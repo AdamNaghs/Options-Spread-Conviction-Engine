@@ -194,4 +194,4 @@ This tool is for educational and research purposes only. Not financial advice. A
 
 ---
 
-**Built with OpenClaw** | **Author:** Leonardo Da Pinchy
+**Built with OpenClaw** | **Authors:** Adam Naghavi & Leonardo Da Pinchy
