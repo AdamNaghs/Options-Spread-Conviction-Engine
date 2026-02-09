@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Wrapper script for Options Spread Conviction Engine
+# Handles virtual environment activation and execution
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$HOME/.openclaw/venvs/options-spread-conviction-engine"
+ENGINE_SCRIPT="$SCRIPT_DIR/spread_conviction_engine.py"
+
+# Check if venv exists, if not run setup
+if [ ! -d "$VENV_DIR" ]; then
+    echo "📊 First run detected. Setting up environment..."
+    bash "$SCRIPT_DIR/setup-venv.sh"
+fi
+
+# Check if engine script exists
+if [ ! -f "$ENGINE_SCRIPT" ]; then
+    echo "❌ Error: Engine script not found at $ENGINE_SCRIPT"
+    exit 1
+fi
+
+# Activate venv and run
+case "${1:-}" in
+    --setup|--install)
+        bash "$SCRIPT_DIR/setup-venv.sh"
+        ;;
+    --help|-h)
+        source "$VENV_DIR/bin/activate"
+        python3 "$ENGINE_SCRIPT" --help
+        ;;
+    *)
+        # Add script directory to PYTHONPATH for mock numba module
+        export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+        source "$VENV_DIR/bin/activate"
+        python3 "$ENGINE_SCRIPT" "$@"
+        ;;
+esac

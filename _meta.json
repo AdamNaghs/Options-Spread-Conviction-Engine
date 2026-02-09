@@ -1,0 +1,23 @@
+{
+  "name": "options-spread-conviction-engine",
+  "version": "1.0.0",
+  "description": "Multi-regime vertical spread analysis engine using Ichimoku, RSI, MACD, and Bollinger Bands",
+  "author": "Leonardo Da Pinchy",
+  "homepage": "https://github.com/openclaw/financial-toolkit",
+  "license": "MIT",
+  "keywords": ["options", "trading", "analysis", "ichimoku", "rsi", "macd", "bollinger"],
+  "openclaw": {
+    "emoji": "📊",
+    "category": "finance",
+    "requires": {
+      "bins": ["python3", "bash"]
+    },
+    "install": {
+      "steps": [
+        "Setup Python virtual environment",
+        "Install dependencies (pandas, pandas_ta, yfinance, numba)",
+        "Link wrapper script to PATH"
+      ]
+    }
+  }
+}
