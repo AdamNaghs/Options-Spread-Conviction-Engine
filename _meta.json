@@ -1,6 +1,6 @@
 {
   "name": "options-spread-conviction-engine",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Multi-regime vertical spread analysis engine with Volume Multiplier and Dynamic Strike Suggestions",
   "author": "Adam Naghavi & Leonardo Da Pinchy",
   "homepage": "https://github.com/AdamNaghs/Options-Spread-Conviction-Engine",

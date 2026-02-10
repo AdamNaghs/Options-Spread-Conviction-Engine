@@ -1,7 +1,7 @@
 ---
 name: options-spread-conviction-engine
 description: Multi-regime vertical spread analysis engine. Scores bull put, bear call, bull call, and bear put spreads using Ichimoku, RSI, MACD, and Bollinger Bands. Outputs 0-100 conviction scores with actionable recommendations.
-version: 1.0.0
+version: 1.1.1
 author: Leonardo Da Pinchy
 metadata:
   openclaw:

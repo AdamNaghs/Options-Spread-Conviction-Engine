@@ -6,7 +6,7 @@ Spread Conviction Engine — Unified Multi-Strategy Vertical Spread Scoring
 
 Author:     Financial Toolkit (OpenClaw)
 Created:    2026-02-09
-Version:    1.1.0
+Version:    1.1.1
 License:    MIT
 
 Description:
@@ -67,7 +67,7 @@ import sys
 import warnings
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 import pandas_ta as ta
@@ -340,11 +340,11 @@ class VolumeSignal:
     Attributes:
         relative_volume:  Current volume / 20-day SMA volume
         is_elevated:      True if relative_volume > 1.25
-        multiplier:       Score multiplier based on volume strength
+        adjustment:       Score adjustment (+/- points) based on volume strength
     """
     relative_volume: float
     is_elevated: bool
-    multiplier: float = 1.0
+    adjustment: float = 0.0
 
 
 @dataclass
@@ -393,7 +393,7 @@ class ConvictionResult:
     strikes: SuggestedStrikes
     rationale: list = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain dictionary (JSON-safe)."""
         return asdict(self)
 
@@ -487,6 +487,48 @@ def compute_volume_stats(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def validate_indicator_columns(df: pd.DataFrame) -> None:
+    """
+    Validate that all expected indicator columns exist after computation.
+    Raises ValueError with descriptive message if columns are missing.
+    """
+    required_cols = {
+        "ichimoku": [
+            f"ITS_{ICHIMOKU_TENKAN}",
+            f"IKS_{ICHIMOKU_KIJUN}",
+            f"ISA_{ICHIMOKU_TENKAN}",
+            f"ISB_{ICHIMOKU_KIJUN}",
+        ],
+        "rsi": ["RSI"],
+        "macd": [
+            f"MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}",
+            f"MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}",
+            f"MACDh_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}",
+        ],
+        "bollinger": [
+            f"BBL_{BBANDS_LENGTH}_{BBANDS_STD}_{BBANDS_STD}",
+            f"BBM_{BBANDS_LENGTH}_{BBANDS_STD}_{BBANDS_STD}",
+            f"BBU_{BBANDS_LENGTH}_{BBANDS_STD}_{BBANDS_STD}",
+            f"BBB_{BBANDS_LENGTH}_{BBANDS_STD}_{BBANDS_STD}",
+            f"BBP_{BBANDS_LENGTH}_{BBANDS_STD}_{BBANDS_STD}",
+        ],
+        "volume": ["VOL_SMA", "REL_VOL"],
+    }
+
+    missing = []
+    for indicator, cols in required_cols.items():
+        for col in cols:
+            if col not in df.columns:
+                missing.append(f"{indicator}:{col}")
+
+    if missing:
+        raise ValueError(
+            f"Missing expected indicator columns: {', '.join(missing)}. "
+            f"This may indicate a pandas_ta version change or insufficient data. "
+            f"Expected columns are based on pandas_ta naming conventions."
+        )
+
+
 def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Pipeline: compute every indicator in sequence.
@@ -498,6 +540,10 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = compute_macd(df)
     df = compute_bbands(df)
     df = compute_volume_stats(df)
+
+    # Validate all expected columns exist
+    validate_indicator_columns(df)
+
     return df
 
 
@@ -687,32 +733,40 @@ def score_rsi(
     rsi_val = float(df.iloc[-1]["RSI"])
 
     if strategy == StrategyType.BULL_PUT:
-        if 30 <= rsi_val <= 45:
-            raw, zone = 1.00, "OVERSOLD_BOUNCE (30–45)"
-        elif 45 < rsi_val <= 55:
-            raw, zone = 0.80, "NEUTRAL_BULLISH (45–55)"
+        if 30 <= rsi_val < 45:
+            raw, zone = 1.00, "OVERSOLD_BOUNCE (30-45)"
+        elif rsi_val == 45:
+            raw, zone = 0.90, "BALANCED_BULLISH (45)"
+        elif 45 < rsi_val < 55:
+            raw, zone = 0.80, "NEUTRAL_BULLISH (45-55)"
+        elif rsi_val == 55:
+            raw, zone = 0.70, "BALANCED_UPPER (55)"
         elif 55 < rsi_val <= 65:
-            raw, zone = 0.60, "BULLISH (55–65)"
+            raw, zone = 0.60, "BULLISH (55-65)"
         elif 25 <= rsi_val < 30:
-            raw, zone = 0.40, "DEEP_OVERSOLD (25–30)"
+            raw, zone = 0.40, "DEEP_OVERSOLD (25-30)"
         elif 65 < rsi_val <= 75:
-            raw, zone = 0.30, "OVERBOUGHT_CAUTION (65–75)"
+            raw, zone = 0.30, "OVERBOUGHT_CAUTION (65-75)"
         elif rsi_val < 25:
             raw, zone = 0.10, "EXTREME_OVERSOLD (<25)"
         else:  # > 75
             raw, zone = 0.10, "EXTREME_OVERBOUGHT (>75)"
 
     elif strategy == StrategyType.BEAR_CALL:
-        if 55 <= rsi_val <= 70:
-            raw, zone = 1.00, "OVERBOUGHT_REJECTION (55–70)"
-        elif 45 <= rsi_val < 55:
-            raw, zone = 0.80, "NEUTRAL_BEARISH (45–55)"
+        if 55 < rsi_val <= 70:
+            raw, zone = 1.00, "OVERBOUGHT_REJECTION (55-70)"
+        elif rsi_val == 55:
+            raw, zone = 0.90, "BALANCED_BEARISH (55)"
+        elif 45 < rsi_val < 55:
+            raw, zone = 0.80, "NEUTRAL_BEARISH (45-55)"
+        elif rsi_val == 45:
+            raw, zone = 0.70, "BALANCED_LOWER (45)"
         elif 35 <= rsi_val < 45:
-            raw, zone = 0.60, "BEARISH (35–45)"
+            raw, zone = 0.60, "BEARISH (35-45)"
         elif 70 < rsi_val <= 75:
-            raw, zone = 0.40, "DEEP_OVERBOUGHT (70–75)"
+            raw, zone = 0.40, "DEEP_OVERBOUGHT (70-75)"
         elif 25 <= rsi_val < 35:
-            raw, zone = 0.30, "OVERSOLD_CAUTION (25–35)"
+            raw, zone = 0.30, "OVERSOLD_CAUTION (25-35)"
         elif rsi_val > 75:
             raw, zone = 0.10, "EXTREME_OVERBOUGHT (>75)"
         else:  # < 25
@@ -720,13 +774,13 @@ def score_rsi(
 
     elif strategy == StrategyType.BULL_CALL:
         if 55 <= rsi_val <= 70:
-            raw, zone = 1.00, "STRONG_BULLISH_MOMENTUM (55–70)"
+            raw, zone = 1.00, "STRONG_BULLISH_MOMENTUM (55-70)"
         elif 45 <= rsi_val < 55:
-            raw, zone = 0.70, "BUILDING_MOMENTUM (45–55)"
+            raw, zone = 0.70, "BUILDING_MOMENTUM (45-55)"
         elif 70 < rsi_val <= 80:
-            raw, zone = 0.50, "VERY_STRONG (70–80)"
+            raw, zone = 0.50, "VERY_STRONG (70-80)"
         elif 35 <= rsi_val < 45:
-            raw, zone = 0.25, "WEAK_MOMENTUM (35–45)"
+            raw, zone = 0.25, "WEAK_MOMENTUM (35-45)"
         elif rsi_val > 80:
             raw, zone = 0.15, "PARABOLIC_RISK (>80)"
         else:  # < 35
@@ -734,13 +788,13 @@ def score_rsi(
 
     else:  # BEAR_PUT
         if 30 <= rsi_val <= 45:
-            raw, zone = 1.00, "STRONG_BEARISH_MOMENTUM (30–45)"
+            raw, zone = 1.00, "STRONG_BEARISH_MOMENTUM (30-45)"
         elif 45 < rsi_val <= 55:
-            raw, zone = 0.70, "BUILDING_BEARISH (45–55)"
+            raw, zone = 0.70, "BUILDING_BEARISH (45-55)"
         elif 20 <= rsi_val < 30:
-            raw, zone = 0.50, "VERY_STRONG_BEARISH (20–30)"
+            raw, zone = 0.50, "VERY_STRONG_BEARISH (20-30)"
         elif 55 < rsi_val <= 65:
-            raw, zone = 0.25, "WEAK_BEARISH (55–65)"
+            raw, zone = 0.25, "WEAK_BEARISH (55-65)"
         elif rsi_val < 20:
             raw, zone = 0.15, "CAPITULATION_RISK (<20)"
         else:  # > 65
@@ -755,7 +809,7 @@ def score_rsi(
     )
 
 
-def _detect_crossover(df: pd.DataFrame, macd_col: str, signal_col: str, lookback: int = 3):
+def _detect_crossover(df: pd.DataFrame, macd_col: str, signal_col: str, lookback: int = 3) -> tuple[str, bool, bool]:
     """
     Detect MACD/Signal crossover within the last ``lookback`` bars.
 
@@ -1127,35 +1181,44 @@ def score_bollinger(
 
 def score_volume(df: pd.DataFrame, strategy: StrategyType) -> VolumeSignal:
     """
-    Determine volume multiplier for conviction.
+    Determine volume adjustment for conviction.
     Breakouts (debit) require high volume confirmation.
     Mean-reversion (credit) benefits from low-volume exhaustion at levels.
+
+    Returns an adjustment factor (±10 points max) rather than a multiplier
+    to prevent volume from masking weak indicator signals.
     """
     rv = float(df.iloc[-1]["REL_VOL"])
     elevated = rv > 1.25
 
-    # Base multiplier is 1.0
-    multiplier = 1.0
+    # Base adjustment is 0 (no change)
+    adjustment = 0.0
 
     if strategy.is_debit:
-        # Debit: breakout needs volume
+        # Debit: breakout needs volume confirmation
         if rv > 1.5:
-            multiplier = 1.15
+            adjustment = 10.0  # Strong confirmation
         elif rv > 1.25:
-            multiplier = 1.05
+            adjustment = 5.0   # Moderate confirmation
         elif rv < 0.75:
-            multiplier = 0.85
+            adjustment = -10.0 # Weak volume, questionable breakout
+        elif rv < 1.0:
+            adjustment = -5.0  # Below average volume
     else:
         # Credit: mean-reversion likes volume exhaustion (low volume)
         if rv < 0.75:
-            multiplier = 1.10
+            adjustment = 10.0  # Exhaustion at support/resistance
+        elif rv < 1.0:
+            adjustment = 5.0   # Below average
         elif rv > 1.5:
-            multiplier = 0.90  # Danger: high volume move against us
+            adjustment = -10.0 # High volume move may continue
+        elif rv > 1.25:
+            adjustment = -5.0  # Elevated volume caution
 
     return VolumeSignal(
         relative_volume=round(rv, 2),
         is_elevated=elevated,
-        multiplier=multiplier
+        adjustment=adjustment
     )
 
 
@@ -1173,22 +1236,22 @@ def calculate_strikes(
         # Sell strike near BBL (support), Long strike below
         short = bollinger.lower
         long = short - (price * 0.02)
-        desc = "Sell support (BBL), Buy 2% below for protection."
+        desc = "Sell support (BBL), Buy theoretical 2% below. Round to nearest strike."
     elif strategy == StrategyType.BEAR_CALL:
         # Sell strike near BBU (resistance), Long strike above
         short = bollinger.upper
         long = short + (price * 0.02)
-        desc = "Sell resistance (BBU), Buy 2% above for protection."
+        desc = "Sell resistance (BBU), Buy theoretical 2% above. Round to nearest strike."
     elif strategy == StrategyType.BULL_CALL:
         # Buy ATM/BBM, Sell BBU
         long = bollinger.middle
         short = bollinger.upper
-        desc = "Buy middle band (SMA), Sell target resistance (BBU)."
+        desc = "Buy middle band (SMA), Sell theoretical resistance (BBU)."
     else:  # BEAR_PUT
         # Buy ATM/BBM, Sell BBL
         long = bollinger.middle
         short = bollinger.lower
-        desc = "Buy middle band (SMA), Sell target support (BBL)."
+        desc = "Buy middle band (SMA), Sell theoretical support (BBL)."
 
     return SuggestedStrikes(
         short_strike=round(short, 2),
@@ -1274,27 +1337,28 @@ def build_rationale(
 
     # Volume check
     vol_status = "ELEVATED" if volume.is_elevated else "NORMAL"
+    adj_sign = "+" if volume.adjustment >= 0 else ""
     if strategy.is_debit and volume.is_elevated:
-        lines.append(f"🚀 Volume: {vol_status} (RV={volume.relative_volume}) — Breakthrough confirmed")
+        lines.append(f"Volume: {vol_status} (RV={volume.relative_volume}) - Breakthrough confirmed ({adj_sign}{volume.adjustment:.0f})")
     elif strategy.is_credit and volume.relative_volume < 0.8:
-        lines.append(f"🛡️ Volume: EXHAUSTED (RV={volume.relative_volume}) — Level holding")
+        lines.append(f"Volume: EXHAUSTED (RV={volume.relative_volume}) - Level holding ({adj_sign}{volume.adjustment:.0f})")
     else:
-        lines.append(f"📊 Volume: {vol_status} (RV={volume.relative_volume})")
+        lines.append(f"Volume: {vol_status} (RV={volume.relative_volume}) ({adj_sign}{volume.adjustment:.0f})")
 
     # Trend alignment check
     if strategy.is_bullish and trend.value in ("STRONG_BULL", "BULL"):
-        lines.append("✅ Trend aligns with bullish strategy")
+        lines.append("Trend aligns with bullish strategy")
     elif strategy.is_bearish and trend.value in ("STRONG_BEAR", "BEAR"):
-        lines.append("✅ Trend aligns with bearish strategy")
+        lines.append("Trend aligns with bearish strategy")
     elif trend.value == "NEUTRAL":
-        lines.append("⚠️  Trend is neutral — mixed alignment")
+        lines.append("Trend is neutral - mixed alignment")
     else:
-        lines.append("⚠️  Trend opposes strategy direction — exercise caution")
+        lines.append("Trend opposes strategy direction - exercise caution")
     lines.append("")
 
     # Strikes
-    lines.append(f"📍 Suggested Strikes: ${strikes.short_strike} / ${strikes.long_strike}")
-    lines.append(f"   Logic: {strikes.description}")
+    lines.append(f"Suggested Strikes: ${strikes.short_strike} / ${strikes.long_strike}")
+    lines.append(f"Logic: {strikes.description}")
     lines.append("")
 
     # Ichimoku
@@ -1307,7 +1371,7 @@ def build_rationale(
 
     # RSI
     lines.append(f"[RSI +{rsi.component_score:.1f}/{weights.rsi}]")
-    lines.append(f"  RSI({RSI_LENGTH}) = {rsi.value} → {rsi.zone}")
+    lines.append(f"  RSI({RSI_LENGTH}) = {rsi.value} -> {rsi.zone}")
 
     # MACD
     lines.append(f"[MACD +{macd.component_score:.1f}/{weights.macd}]")
@@ -1316,7 +1380,7 @@ def build_rationale(
                  f"({macd.macd_value:.4f} vs {macd.signal_value:.4f})")
     lines.append(f"  Histogram: {macd.histogram:.4f} ({macd.hist_direction})")
     if macd.crossover != "NONE":
-        lines.append(f"  ⚡ Recent crossover: {macd.crossover}")
+        lines.append(f"  Recent crossover: {macd.crossover}")
 
     # Bollinger
     lines.append(f"[Bollinger +{bollinger.component_score:.1f}/{weights.bollinger}]")
@@ -1346,6 +1410,13 @@ def analyse(
     # Step 1: Fetch data
     df = fetch_ohlcv(ticker, period=period, interval=interval)
 
+    # Data sufficiency check for Ichimoku (requires ~180 periods for full ISA/ISB)
+    min_periods = ICHIMOKU_SENKOU + ICHIMOKU_KIJUN
+    if len(df) < min_periods:
+        warnings.warn(f"Insufficient data for ticker {ticker}. "
+                      f"Found {len(df)} rows, need {min_periods} for full "
+                      f"Ichimoku cloud. Results may be skewed.")
+
     # Step 2: Compute indicators
     df = compute_all_indicators(df)
 
@@ -1359,14 +1430,34 @@ def analyse(
     bollinger_sig = score_bollinger(df, strategy, weights)
     volume_sig = score_volume(df, strategy)
 
-    # Step 5: Aggregate and apply volume multiplier
-    conviction = (
+    # Check for NaNs in critical indicators
+    nan_issues = []
+    if pd.isna(ichimoku_sig.senkou_a) or pd.isna(ichimoku_sig.senkou_b):
+        nan_issues.append("Ichimoku cloud")
+    if pd.isna(rsi_sig.value):
+        nan_issues.append("RSI")
+    if pd.isna(macd_sig.macd_value) or pd.isna(macd_sig.signal_value):
+        nan_issues.append("MACD")
+    if pd.isna(bollinger_sig.upper) or pd.isna(bollinger_sig.lower):
+        nan_issues.append("Bollinger Bands")
+    if pd.isna(volume_sig.relative_volume):
+        nan_issues.append("Volume")
+
+    if nan_issues:
+        issues_str = ", ".join(nan_issues)
+        warnings.warn(f"NaN values detected in {issues_str} for {ticker}. "
+                      f"Lookback period '{period}' may be too short or data insufficient.")
+
+    # Step 5: Aggregate component scores and apply volume adjustment
+    base_conviction = (
         ichimoku_sig.component_score
         + rsi_sig.component_score
         + macd_sig.component_score
         + bollinger_sig.component_score
-    ) * volume_sig.multiplier
-    
+    )
+
+    # Apply volume adjustment (additive, max ±10 points)
+    conviction = base_conviction + volume_sig.adjustment
     conviction = round(max(0.0, min(100.0, conviction)), 2)
 
     tier = ConvictionTier.from_score(conviction)
@@ -1406,23 +1497,15 @@ def analyse(
 def print_report(result: ConvictionResult) -> None:
     """Pretty-print a conviction report to stdout."""
 
-    tier_emoji = {
-        "WAIT": "🔴",
-        "WATCH": "🟡",
-        "PREPARE": "🟠",
-        "EXECUTE": "🟢",
-    }
-    emoji = tier_emoji.get(result.tier, "⚪")
-
     print()
     print("=" * 70)
-    print(f"  CONVICTION REPORT: {result.ticker} (v1.1.0)")
+    print(f"  CONVICTION REPORT: {result.ticker} (v1.1.1)")
     print(f"  Strategy: {result.strategy_label}")
     print("=" * 70)
     print(f"  Price:       ${result.price}")
     print(f"  Trend:       {result.trend_bias}")
     print(f"  Conviction:  {result.conviction_score:.1f} / 100")
-    print(f"  Action Tier: {emoji} {result.tier}")
+    print(f"  Action Tier: {result.tier}")
     print("-" * 70)
     for line in result.rationale:
         print(f"  {line}")
@@ -1453,10 +1536,10 @@ def main() -> None:
             "  bear_put   Debit spread.  Breakout: bearish momentum.\n"
             "\n"
             "Conviction Tiers:\n"
-            "  🔴 WAIT    (0–39)   → Conditions unfavourable. Stay patient.\n"
-            "  🟡 WATCH   (40–59)  → Getting interesting. Monitor closely.\n"
-            "  🟠 PREPARE (60–79)  → Favourable. Size your trade.\n"
-            "  🟢 EXECUTE (80–100) → High conviction. Enter the spread.\n"
+            "  WAIT    (0–39)   → Conditions unfavourable. Stay patient.\n"
+            "  WATCH   (40–59)  → Getting interesting. Monitor closely.\n"
+            "  PREPARE (60–79)  → Favourable. Size your trade.\n"
+            "  EXECUTE (80–100) → High conviction. Enter the spread.\n"
         ),
     )
     parser.add_argument(
