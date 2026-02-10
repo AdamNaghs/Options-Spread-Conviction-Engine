@@ -6,7 +6,7 @@ Spread Conviction Engine — Unified Multi-Strategy Vertical Spread Scoring
 
 Author:     Financial Toolkit (OpenClaw)
 Created:    2026-02-09
-Version:    1.1.1
+Version:    1.2.0
 License:    MIT
 
 Description:
@@ -93,6 +93,7 @@ ICHIMOKU_KIJUN: int = 60      # Base Line (Kijun-sen); standard = 26
 ICHIMOKU_SENKOU: int = 120    # Leading Span B (Senkou Span B); standard = 52
 ICHIMOKU_CHIKOU: int = 30     # Lagging Span displacement; standard = 26
 RSI_LENGTH: int = 14
+ADX_LENGTH: int = 14
 MACD_FAST: int = 12
 MACD_SLOW: int = 26
 MACD_SIGNAL: int = 9
@@ -180,19 +181,20 @@ class StrategyWeights:
     rsi: int
     macd: int
     bollinger: int
+    adx: int
 
     def __post_init__(self) -> None:
-        total = self.ichimoku + self.rsi + self.macd + self.bollinger
+        total = self.ichimoku + self.rsi + self.macd + self.bollinger + self.adx
         assert total == 100, f"Weights must sum to 100, got {total}"
 
 
 STRATEGY_WEIGHTS: dict[StrategyType, StrategyWeights] = {
-    # Credit: Trend structure (30) + entry timing (25) + momentum (20) + vol (25)
-    StrategyType.BULL_PUT:  StrategyWeights(ichimoku=30, rsi=25, macd=20, bollinger=25),
-    StrategyType.BEAR_CALL: StrategyWeights(ichimoku=30, rsi=25, macd=20, bollinger=25),
-    # Debit: Trend confirm (25) + direction (15) + momentum (35) + vol (25)
-    StrategyType.BULL_CALL: StrategyWeights(ichimoku=25, rsi=15, macd=35, bollinger=25),
-    StrategyType.BEAR_PUT:  StrategyWeights(ichimoku=25, rsi=15, macd=35, bollinger=25),
+    # Credit: Trend structure (25) + entry timing (20) + momentum (15) + vol (25) + strength (15)
+    StrategyType.BULL_PUT:  StrategyWeights(ichimoku=25, rsi=20, macd=15, bollinger=25, adx=15),
+    StrategyType.BEAR_CALL: StrategyWeights(ichimoku=25, rsi=20, macd=15, bollinger=25, adx=15),
+    # Debit: Trend confirm (20) + direction (10) + momentum (30) + vol (25) + strength (15)
+    StrategyType.BULL_CALL: StrategyWeights(ichimoku=20, rsi=10, macd=30, bollinger=25, adx=15),
+    StrategyType.BEAR_PUT:  StrategyWeights(ichimoku=20, rsi=10, macd=30, bollinger=25, adx=15),
 }
 
 
@@ -333,6 +335,21 @@ class BollingerSignal:
 
 
 @dataclass
+class ADXSignal:
+    """
+    Average Directional Index (ADX) signal.
+
+    Attributes:
+        value:            Current ADX value
+        trend_strength:   Label (e.g., 'WEAK', 'MODERATE', 'STRONG')
+        component_score:  Sub-score contribution (0 to weight)
+    """
+    value: float
+    trend_strength: str
+    component_score: float = 0.0
+
+
+@dataclass
 class VolumeSignal:
     """
     Volume analysis signal.
@@ -370,12 +387,9 @@ class ConvictionResult:
         conviction_score: Aggregate score (0–100)
         tier:             Action tier (WAIT / WATCH / PREPARE / EXECUTE)
         trend_bias:       Overall qualitative trend assessment
-        ichimoku:         Detailed Ichimoku signal
-        rsi:              Detailed RSI signal
-        macd:             Detailed MACD signal
-        bollinger:        Detailed Bollinger signal
         volume:           Volume strength signal
         strikes:          Recommended short/long strikes
+        data_quality:     Assessment of input data (HIGH, MEDIUM, LOW)
         rationale:        Human-readable explanation of the score
     """
     ticker: str
@@ -389,8 +403,10 @@ class ConvictionResult:
     rsi: RSISignal
     macd: MACDSignal
     bollinger: BollingerSignal
+    adx: ADXSignal
     volume: VolumeSignal
     strikes: SuggestedStrikes
+    data_quality: str = "HIGH"
     rationale: list = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -478,6 +494,15 @@ def compute_bbands(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([df, bbands_df], axis=1)
 
 
+def compute_adx(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute ADX and merge into the DataFrame.
+    Adds columns: ADX_14, DMP_14, DMN_14
+    """
+    adx_df = ta.adx(df["High"], df["Low"], df["Close"], length=ADX_LENGTH)
+    return pd.concat([df, adx_df], axis=1)
+
+
 def compute_volume_stats(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute relative volume stats.
@@ -512,6 +537,7 @@ def validate_indicator_columns(df: pd.DataFrame) -> None:
             f"BBB_{BBANDS_LENGTH}_{BBANDS_STD}_{BBANDS_STD}",
             f"BBP_{BBANDS_LENGTH}_{BBANDS_STD}_{BBANDS_STD}",
         ],
+        "adx": [f"ADX_{ADX_LENGTH}"],
         "volume": ["VOL_SMA", "REL_VOL"],
     }
 
@@ -539,6 +565,7 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = compute_rsi(df)
     df = compute_macd(df)
     df = compute_bbands(df)
+    df = compute_adx(df)
     df = compute_volume_stats(df)
 
     # Validate all expected columns exist
@@ -674,131 +701,55 @@ def score_rsi(
     weights: StrategyWeights,
 ) -> RSISignal:
     """
-    Score RSI for the given strategy.
-
-    Each strategy has a distinct ideal RSI zone:
-
-    bull_put (Credit — oversold bounce):
-    ┌────────────┬───────┬──────────────────────────────────────────────┐
-    │ RSI Range  │ Score │ Rationale                                    │
-    ├────────────┼───────┼──────────────────────────────────────────────┤
-    │ 30–45      │ 1.00  │ Oversold in uptrend = prime bounce setup     │
-    │ 45–55      │ 0.80  │ Neutral-bullish. Steady.                     │
-    │ 55–65      │ 0.60  │ Bullish momentum. Acceptable.                │
-    │ 25–30      │ 0.40  │ Deep oversold. Could bounce or break.        │
-    │ 65–75      │ 0.30  │ Overbought caution.                          │
-    │ <25        │ 0.10  │ Extreme oversold. Breakdown risk.             │
-    │ >75        │ 0.10  │ Extreme overbought. Reversal risk.            │
-    └────────────┴───────┴──────────────────────────────────────────────┘
-
-    bear_call (Credit — overbought rejection):
-    ┌────────────┬───────┬──────────────────────────────────────────────┐
-    │ 55–70      │ 1.00  │ Overbought in downtrend = rejection setup    │
-    │ 45–55      │ 0.80  │ Neutral-bearish. Steady.                     │
-    │ 35–45      │ 0.60  │ Bearish momentum. Acceptable.                │
-    │ 70–75      │ 0.40  │ Deep overbought. Could reject or break up.   │
-    │ 25–35      │ 0.30  │ Oversold caution. Bounce risk.               │
-    │ >75        │ 0.10  │ Extreme overbought. Blow-off risk.            │
-    │ <25        │ 0.10  │ Extreme oversold. Already broken.             │
-    └────────────┴───────┴──────────────────────────────────────────────┘
-
-    bull_call (Debit — bullish breakout momentum):
-    ┌────────────┬───────┬──────────────────────────────────────────────┐
-    │ 55–70      │ 1.00  │ Strong bullish momentum. Ideal.              │
-    │ 45–55      │ 0.70  │ Building momentum. Good.                     │
-    │ 70–80      │ 0.50  │ Very strong. Approaching extreme.            │
-    │ 35–45      │ 0.25  │ Weak momentum. Insufficient.                 │
-    │ >80        │ 0.15  │ Parabolic / blow-off top risk.               │
-    │ <35        │ 0.05  │ Wrong direction entirely.                     │
-    └────────────┴───────┴──────────────────────────────────────────────┘
-
-    bear_put (Debit — bearish breakdown momentum):
-    ┌────────────┬───────┬──────────────────────────────────────────────┐
-    │ 30–45      │ 1.00  │ Strong bearish momentum. Ideal.              │
-    │ 45–55      │ 0.70  │ Building bearish pressure. Good.             │
-    │ 20–30      │ 0.50  │ Very strong bearish. Approaching extreme.    │
-    │ 55–65      │ 0.25  │ Weak bearish. Insufficient.                  │
-    │ <20        │ 0.15  │ Capitulation — potential snap-back risk.     │
-    │ >65        │ 0.05  │ Wrong direction entirely.                     │
-    └────────────┴───────┴──────────────────────────────────────────────┘
-
-    Parameters:
-        df:       DataFrame with 'RSI' column
-        strategy: Active strategy
-        weights:  Component weights for this strategy
-
-    Returns:
-        RSISignal with populated component_score
+    Score RSI for the given strategy using a lookup table for contiguous ranges.
     """
     rsi_val = float(df.iloc[-1]["RSI"])
 
-    if strategy == StrategyType.BULL_PUT:
-        if 30 <= rsi_val < 45:
-            raw, zone = 1.00, "OVERSOLD_BOUNCE (30-45)"
-        elif rsi_val == 45:
-            raw, zone = 0.90, "BALANCED_BULLISH (45)"
-        elif 45 < rsi_val < 55:
-            raw, zone = 0.80, "NEUTRAL_BULLISH (45-55)"
-        elif rsi_val == 55:
-            raw, zone = 0.70, "BALANCED_UPPER (55)"
-        elif 55 < rsi_val <= 65:
-            raw, zone = 0.60, "BULLISH (55-65)"
-        elif 25 <= rsi_val < 30:
-            raw, zone = 0.40, "DEEP_OVERSOLD (25-30)"
-        elif 65 < rsi_val <= 75:
-            raw, zone = 0.30, "OVERBOUGHT_CAUTION (65-75)"
-        elif rsi_val < 25:
-            raw, zone = 0.10, "EXTREME_OVERSOLD (<25)"
-        else:  # > 75
-            raw, zone = 0.10, "EXTREME_OVERBOUGHT (>75)"
+    # Lookup tables: (min_inclusive, max_exclusive, score, label)
+    # The last entry in each list uses a high max (101) to cover up to 100.
+    # We sort them by min_inclusive to ensure predictable lookup.
+    tables = {
+        StrategyType.BULL_PUT: [
+            (0,  25, 0.10, "EXTREME_OVERSOLD (<25)"),
+            (25, 30, 0.40, "DEEP_OVERSOLD (25-30)"),
+            (30, 45, 1.00, "OVERSOLD_BOUNCE (30-45)"),
+            (45, 55, 0.80, "NEUTRAL_BULLISH (45-55)"),
+            (55, 65, 0.60, "BULLISH (55-65)"),
+            (65, 75, 0.30, "OVERBOUGHT_CAUTION (65-75)"),
+            (75, 101, 0.10, "EXTREME_OVERBOUGHT (>75)"),
+        ],
+        StrategyType.BEAR_CALL: [
+            (0,  25, 0.10, "EXTREME_OVERSOLD (<25)"),
+            (25, 35, 0.30, "OVERSOLD_CAUTION (25-35)"),
+            (35, 45, 0.60, "BEARISH (35-45)"),
+            (45, 55, 0.80, "NEUTRAL_BEARISH (45-55)"),
+            (55, 70, 1.00, "OVERBOUGHT_REJECTION (55-70)"),
+            (70, 75, 0.40, "DEEP_OVERBOUGHT (70-75)"),
+            (75, 101, 0.10, "EXTREME_OVERBOUGHT (>75)"),
+        ],
+        StrategyType.BULL_CALL: [
+            (0,  35, 0.05, "WRONG_DIRECTION (<35)"),
+            (35, 45, 0.25, "WEAK_MOMENTUM (35-45)"),
+            (45, 55, 0.70, "BUILDING_MOMENTUM (45-55)"),
+            (55, 70, 1.00, "STRONG_BULLISH_MOMENTUM (55-70)"),
+            (70, 80, 0.50, "VERY_STRONG (70-80)"),
+            (80, 101, 0.15, "PARABOLIC_RISK (>80)"),
+        ],
+        StrategyType.BEAR_PUT: [
+            (0,  20, 0.15, "CAPITULATION_RISK (<20)"),
+            (20, 30, 0.50, "VERY_STRONG_BEARISH (20-30)"),
+            (30, 45, 1.00, "STRONG_BEARISH_MOMENTUM (30-45)"),
+            (45, 55, 0.70, "BUILDING_BEARISH (45-55)"),
+            (55, 65, 0.25, "WEAK_BEARISH (55-65)"),
+            (65, 101, 0.05, "WRONG_DIRECTION (>65)"),
+        ]
+    }
 
-    elif strategy == StrategyType.BEAR_CALL:
-        if 55 < rsi_val <= 70:
-            raw, zone = 1.00, "OVERBOUGHT_REJECTION (55-70)"
-        elif rsi_val == 55:
-            raw, zone = 0.90, "BALANCED_BEARISH (55)"
-        elif 45 < rsi_val < 55:
-            raw, zone = 0.80, "NEUTRAL_BEARISH (45-55)"
-        elif rsi_val == 45:
-            raw, zone = 0.70, "BALANCED_LOWER (45)"
-        elif 35 <= rsi_val < 45:
-            raw, zone = 0.60, "BEARISH (35-45)"
-        elif 70 < rsi_val <= 75:
-            raw, zone = 0.40, "DEEP_OVERBOUGHT (70-75)"
-        elif 25 <= rsi_val < 35:
-            raw, zone = 0.30, "OVERSOLD_CAUTION (25-35)"
-        elif rsi_val > 75:
-            raw, zone = 0.10, "EXTREME_OVERBOUGHT (>75)"
-        else:  # < 25
-            raw, zone = 0.10, "EXTREME_OVERSOLD (<25)"
-
-    elif strategy == StrategyType.BULL_CALL:
-        if 55 <= rsi_val <= 70:
-            raw, zone = 1.00, "STRONG_BULLISH_MOMENTUM (55-70)"
-        elif 45 <= rsi_val < 55:
-            raw, zone = 0.70, "BUILDING_MOMENTUM (45-55)"
-        elif 70 < rsi_val <= 80:
-            raw, zone = 0.50, "VERY_STRONG (70-80)"
-        elif 35 <= rsi_val < 45:
-            raw, zone = 0.25, "WEAK_MOMENTUM (35-45)"
-        elif rsi_val > 80:
-            raw, zone = 0.15, "PARABOLIC_RISK (>80)"
-        else:  # < 35
-            raw, zone = 0.05, "WRONG_DIRECTION (<35)"
-
-    else:  # BEAR_PUT
-        if 30 <= rsi_val <= 45:
-            raw, zone = 1.00, "STRONG_BEARISH_MOMENTUM (30-45)"
-        elif 45 < rsi_val <= 55:
-            raw, zone = 0.70, "BUILDING_BEARISH (45-55)"
-        elif 20 <= rsi_val < 30:
-            raw, zone = 0.50, "VERY_STRONG_BEARISH (20-30)"
-        elif 55 < rsi_val <= 65:
-            raw, zone = 0.25, "WEAK_BEARISH (55-65)"
-        elif rsi_val < 20:
-            raw, zone = 0.15, "CAPITULATION_RISK (<20)"
-        else:  # > 65
-            raw, zone = 0.05, "WRONG_DIRECTION (>65)"
+    raw, zone = 0.0, "UNKNOWN"
+    for (low, high, score, label) in tables[strategy]:
+        if low <= rsi_val < high:
+            raw, zone = score, label
+            break
 
     component_score = round(raw * weights.rsi, 2)
 
@@ -835,6 +786,7 @@ def _detect_crossover(df: pd.DataFrame, macd_col: str, signal_col: str, lookback
 
 def score_macd(
     df: pd.DataFrame,
+    price: float,
     strategy: StrategyType,
     weights: StrategyWeights,
 ) -> MACDSignal:
@@ -883,8 +835,10 @@ def score_macd(
     macd_above = macd_val > signal_val
 
     # --- Histogram direction ---
+    # Threshold for FLAT is relative to price (0.01%)
     hist_diff = hist_val - prev_hist
-    if abs(hist_diff) < 0.001:
+    threshold = price * 0.0001
+    if abs(hist_diff) < threshold:
         hist_direction = "FLAT"
     elif hist_diff > 0:
         hist_direction = "RISING"
@@ -1179,6 +1133,72 @@ def score_bollinger(
     )
 
 
+def score_adx(
+    df: pd.DataFrame,
+    strategy: StrategyType,
+    weights: StrategyWeights,
+) -> ADXSignal:
+    """
+    Score ADX for the given strategy.
+
+    ADX measures trend strength, regardless of direction.
+    - ADX > 25: Strong trend
+    - ADX < 20: Weak trend / range-bound
+
+    Scoring logic:
+    - If strategy is CREDIT (mean reversion):
+        Likes moderate ADX (15-25). Too high (>35) means trend is too strong
+        to fade. Too low (<15) means no clear structure.
+    - If strategy is DEBIT (breakout):
+        Likes rising and strong ADX (>25).
+
+    Returns:
+        ADXSignal with populated component_score
+    """
+    latest = df.iloc[-1]
+    adx_val = float(latest[f"ADX_{ADX_LENGTH}"])
+
+    if adx_val >= 40:
+        strength = "VERY_STRONG"
+    elif adx_val >= 25:
+        strength = "STRONG"
+    elif adx_val >= 20:
+        strength = "MODERATE"
+    else:
+        strength = "WEAK"
+
+    if strategy.is_credit:
+        # Credit likes moderate trend strength
+        if 15 <= adx_val <= 30:
+            raw = 1.0
+        elif 30 < adx_val <= 40:
+            raw = 0.6
+        elif 10 <= adx_val < 15:
+            raw = 0.5
+        elif adx_val > 40:
+            raw = 0.2  # Trend too strong to fade
+        else:
+            raw = 0.1
+    else:
+        # Debit likes strong trend strength
+        if adx_val >= 25:
+            raw = 1.0
+        elif 20 <= adx_val < 25:
+            raw = 0.7
+        elif 15 <= adx_val < 20:
+            raw = 0.4
+        else:
+            raw = 0.1
+
+    component_score = round(raw * weights.adx, 2)
+
+    return ADXSignal(
+        value=round(adx_val, 2),
+        trend_strength=strength,
+        component_score=component_score,
+    )
+
+
 def score_volume(df: pd.DataFrame, strategy: StrategyType) -> VolumeSignal:
     """
     Determine volume adjustment for conviction.
@@ -1318,6 +1338,7 @@ def build_rationale(
     rsi: RSISignal,
     macd: MACDSignal,
     bollinger: BollingerSignal,
+    adx: ADXSignal,
     volume: VolumeSignal,
     strikes: SuggestedStrikes,
     trend: TrendBias,
@@ -1334,6 +1355,10 @@ def build_rationale(
     lines.append(f"Ideal Setup: {strategy.ideal_setup}")
     lines.append("")
     lines.append(f"Market Trend: {trend.value} | Score: {score:.1f}/100 → {tier.value}")
+
+    # ADX Gate check
+    if strategy.is_credit and adx.value < 20:
+        lines.append("⚠️ TREND STRENGTH GATE: ADX < 20. Credit spread capped at WATCH tier.")
 
     # Volume check
     vol_status = "ELEVATED" if volume.is_elevated else "NORMAL"
@@ -1353,7 +1378,7 @@ def build_rationale(
     elif trend.value == "NEUTRAL":
         lines.append("Trend is neutral - mixed alignment")
     else:
-        lines.append("Trend opposes strategy direction - exercise caution")
+        lines.append("❌ Trend opposes strategy direction - Conflict penalty applied")
     lines.append("")
 
     # Strikes
@@ -1363,31 +1388,50 @@ def build_rationale(
 
     # Ichimoku
     lines.append(f"[Ichimoku +{ichimoku.component_score:.1f}/{weights.ichimoku}]")
-    lines.append(f"  Price is {ichimoku.price_vs_cloud} the cloud")
-    lines.append(f"  TK Cross: {ichimoku.tk_cross} "
-                 f"(Tenkan {ichimoku.tenkan} vs Kijun {ichimoku.kijun})")
-    lines.append(f"  Cloud: {ichimoku.cloud_color}, "
-                 f"thickness {ichimoku.cloud_thickness:.2f}")
+    if ichimoku.price_vs_cloud == "UNKNOWN":
+        lines.append("  DATA MISSING - Component skipped")
+    else:
+        lines.append(f"  Price is {ichimoku.price_vs_cloud} the cloud")
+        lines.append(f"  TK Cross: {ichimoku.tk_cross} "
+                     f"(Tenkan {ichimoku.tenkan} vs Kijun {ichimoku.kijun})")
+        lines.append(f"  Cloud: {ichimoku.cloud_color}, "
+                     f"thickness {ichimoku.cloud_thickness:.2f}")
 
     # RSI
     lines.append(f"[RSI +{rsi.component_score:.1f}/{weights.rsi}]")
-    lines.append(f"  RSI({RSI_LENGTH}) = {rsi.value} -> {rsi.zone}")
+    if rsi.zone == "UNKNOWN":
+        lines.append("  DATA MISSING - Component skipped")
+    else:
+        lines.append(f"  RSI({RSI_LENGTH}) = {rsi.value} -> {rsi.zone}")
 
     # MACD
     lines.append(f"[MACD +{macd.component_score:.1f}/{weights.macd}]")
-    direction = "above" if macd.macd_above_signal else "below"
-    lines.append(f"  MACD {direction} Signal "
-                 f"({macd.macd_value:.4f} vs {macd.signal_value:.4f})")
-    lines.append(f"  Histogram: {macd.histogram:.4f} ({macd.hist_direction})")
-    if macd.crossover != "NONE":
-        lines.append(f"  Recent crossover: {macd.crossover}")
+    if macd.hist_direction == "UNKNOWN":
+        lines.append("  DATA MISSING - Component skipped")
+    else:
+        direction = "above" if macd.macd_above_signal else "below"
+        lines.append(f"  MACD {direction} Signal "
+                     f"({macd.macd_value:.4f} vs {macd.signal_value:.4f})")
+        lines.append(f"  Histogram: {macd.histogram:.4f} ({macd.hist_direction})")
+        if macd.crossover != "NONE":
+            lines.append(f"  Recent crossover: {macd.crossover}")
 
     # Bollinger
     lines.append(f"[Bollinger +{bollinger.component_score:.1f}/{weights.bollinger}]")
-    lines.append(f"  %B = {bollinger.percent_b:.4f} | "
-                 f"Bandwidth = {bollinger.bandwidth:.4f}")
-    lines.append(f"  Bands: [{bollinger.lower:.2f} — "
-                 f"{bollinger.middle:.2f} — {bollinger.upper:.2f}]")
+    if bollinger.middle == 0:
+        lines.append("  DATA MISSING - Component skipped")
+    else:
+        lines.append(f"  %B = {bollinger.percent_b:.4f} | "
+                     f"Bandwidth = {bollinger.bandwidth:.4f}")
+        lines.append(f"  Bands: [{bollinger.lower:.2f} — "
+                     f"{bollinger.middle:.2f} — {bollinger.upper:.2f}]")
+
+    # ADX
+    lines.append(f"[ADX +{adx.component_score:.1f}/{weights.adx}]")
+    if adx.trend_strength == "UNKNOWN":
+        lines.append("  DATA MISSING - Component skipped")
+    else:
+        lines.append(f"  ADX({ADX_LENGTH}) = {adx.value} ({adx.trend_strength})")
 
     return lines
 
@@ -1424,50 +1468,129 @@ def analyse(
     price = round(float(df.iloc[-1]["Close"]), 2)
 
     # Step 4: Score each component (strategy-aware)
-    ichimoku_sig = score_ichimoku(df, price, strategy, weights)
-    rsi_sig = score_rsi(df, strategy, weights)
-    macd_sig = score_macd(df, strategy, weights)
-    bollinger_sig = score_bollinger(df, strategy, weights)
+    # We collect scores and their max weights for renormalization in case of NaNs
+    components = []
+    
+    # Ichimoku
+    try:
+        ichimoku_sig = score_ichimoku(df, price, strategy, weights)
+        if pd.isna(ichimoku_sig.senkou_a) or pd.isna(ichimoku_sig.senkou_b):
+            ichimoku_sig.component_score = 0.0 # Mark as invalid for sum
+            ichimoku_available = False
+        else:
+            ichimoku_available = True
+    except:
+        ichimoku_available = False
+        ichimoku_sig = IchimokuSignal("UNKNOWN", "UNKNOWN", "UNKNOWN", 0, 0, 0, 0, 0, 0)
+
+    # RSI
+    try:
+        rsi_sig = score_rsi(df, strategy, weights)
+        if pd.isna(rsi_sig.value):
+            rsi_available = False
+        else:
+            rsi_available = True
+    except:
+        rsi_available = False
+        rsi_sig = RSISignal(0, "UNKNOWN", 0)
+
+    # MACD
+    try:
+        macd_sig = score_macd(df, price, strategy, weights)
+        if pd.isna(macd_sig.macd_value):
+            macd_available = False
+        else:
+            macd_available = True
+    except:
+        macd_available = False
+        macd_sig = MACDSignal(0, 0, 0, "UNKNOWN", "NONE", False, 0)
+
+    # Bollinger
+    try:
+        bollinger_sig = score_bollinger(df, strategy, weights)
+        if pd.isna(bollinger_sig.upper):
+            bollinger_available = False
+        else:
+            bollinger_available = True
+    except:
+        bollinger_available = False
+        bollinger_sig = BollingerSignal(0, 0, 0, 0, 0, 0)
+
+    # ADX
+    try:
+        adx_sig = score_adx(df, strategy, weights)
+        if pd.isna(adx_sig.value):
+            adx_available = False
+        else:
+            adx_available = True
+    except:
+        adx_available = False
+        adx_sig = ADXSignal(0, "UNKNOWN", 0)
+
+    # Volume (Adjustment, not a primary component)
     volume_sig = score_volume(df, strategy)
 
-    # Check for NaNs in critical indicators
-    nan_issues = []
-    if pd.isna(ichimoku_sig.senkou_a) or pd.isna(ichimoku_sig.senkou_b):
-        nan_issues.append("Ichimoku cloud")
-    if pd.isna(rsi_sig.value):
-        nan_issues.append("RSI")
-    if pd.isna(macd_sig.macd_value) or pd.isna(macd_sig.signal_value):
-        nan_issues.append("MACD")
-    if pd.isna(bollinger_sig.upper) or pd.isna(bollinger_sig.lower):
-        nan_issues.append("Bollinger Bands")
-    if pd.isna(volume_sig.relative_volume):
-        nan_issues.append("Volume")
+    # Renormalization logic
+    total_score = 0.0
+    total_weight_available = 0
+    
+    if ichimoku_available:
+        total_score += ichimoku_sig.component_score
+        total_weight_available += weights.ichimoku
+    if rsi_available:
+        total_score += rsi_sig.component_score
+        total_weight_available += weights.rsi
+    if macd_available:
+        total_score += macd_sig.component_score
+        total_weight_available += weights.macd
+    if bollinger_available:
+        total_score += bollinger_sig.component_score
+        total_weight_available += weights.bollinger
+    if adx_available:
+        total_score += adx_sig.component_score
+        total_weight_available += weights.adx
 
-    if nan_issues:
-        issues_str = ", ".join(nan_issues)
-        warnings.warn(f"NaN values detected in {issues_str} for {ticker}. "
-                      f"Lookback period '{period}' may be too short or data insufficient.")
+    if total_weight_available < 50:
+        # Too much missing data
+        raise ValueError(f"Insufficient valid indicator data for {ticker} (only {total_weight_available}% weight available).")
 
-    # Step 5: Aggregate component scores and apply volume adjustment
-    base_conviction = (
-        ichimoku_sig.component_score
-        + rsi_sig.component_score
-        + macd_sig.component_score
-        + bollinger_sig.component_score
-    )
+    # Scale to 100
+    base_conviction = (total_score / total_weight_available) * 100.0
 
     # Apply volume adjustment (additive, max ±10 points)
     conviction = base_conviction + volume_sig.adjustment
+    
+    # Step 5: Trend alignment and ADX Gating
+    trend = classify_trend(ichimoku_sig, macd_sig)
+    
+    # Trend Conflict Penalty (-15 points)
+    penalty = 0.0
+    if strategy.is_bullish and trend == TrendBias.STRONG_BEAR:
+        penalty = -15.0
+    elif strategy.is_bearish and trend == TrendBias.STRONG_BULL:
+        penalty = -15.0
+    elif strategy.is_bullish and trend == TrendBias.BEAR:
+        penalty = -10.0
+    elif strategy.is_bearish and trend == TrendBias.BULL:
+        penalty = -10.0
+        
+    conviction += penalty
     conviction = round(max(0.0, min(100.0, conviction)), 2)
 
     tier = ConvictionTier.from_score(conviction)
-    trend = classify_trend(ichimoku_sig, macd_sig)
+    
+    # ADX Gate: ADX < 20 caps credit spreads at WATCH
+    if strategy.is_credit and adx_sig.value < 20:
+        if tier in (ConvictionTier.PREPARE, ConvictionTier.EXECUTE):
+            tier = ConvictionTier.WATCH
+            # We don't necessarily change the score, but we cap the tier
+    
     strikes = calculate_strikes(price, strategy, bollinger_sig)
 
     # Step 6: Rationale
     rationale = build_rationale(
         strategy, weights,
-        ichimoku_sig, rsi_sig, macd_sig, bollinger_sig,
+        ichimoku_sig, rsi_sig, macd_sig, bollinger_sig, adx_sig,
         volume_sig, strikes,
         trend, conviction, tier,
     )
@@ -1484,6 +1607,7 @@ def analyse(
         rsi=rsi_sig,
         macd=macd_sig,
         bollinger=bollinger_sig,
+        adx=adx_sig,
         volume=volume_sig,
         strikes=strikes,
         rationale=rationale,
@@ -1499,7 +1623,7 @@ def print_report(result: ConvictionResult) -> None:
 
     print()
     print("=" * 70)
-    print(f"  CONVICTION REPORT: {result.ticker} (v1.1.1)")
+    print(f"  CONVICTION REPORT: {result.ticker} (v1.2.0)")
     print(f"  Strategy: {result.strategy_label}")
     print("=" * 70)
     print(f"  Price:       ${result.price}")
