@@ -1,7 +1,7 @@
 ---
 name: options-spread-conviction-engine
 description: Multi-regime vertical spread analysis engine. Scores bull put, bear call, bull call, and bear put spreads using Ichimoku, RSI, MACD, and Bollinger Bands. Outputs 0-100 conviction scores with actionable recommendations.
-version: 1.2.0
+version: 1.2.1
 author: Leonardo Da Pinchy
 metadata:
   openclaw:
@@ -37,18 +37,20 @@ Weights vary by strategy type (Credit = Mean Reversion, Debit = Breakout):
 ### Credit Spreads (bull_put, bear_call)
 | Indicator | Weight | Purpose |
 |-----------|--------|---------|
-| Ichimoku Cloud | 30 pts | Trend structure & equilibrium |
-| RSI | 25 pts | Entry timing (mean-reversion) |
-| MACD | 20 pts | Momentum confirmation |
+| Ichimoku Cloud | 25 pts | Trend structure & equilibrium |
+| RSI | 20 pts | Entry timing (mean-reversion) |
+| MACD | 15 pts | Momentum confirmation |
 | Bollinger Bands | 25 pts | Volatility regime |
+| ADX | 15 pts | Trend strength validation |
 
 ### Debit Spreads (bull_call, bear_put)
 | Indicator | Weight | Purpose |
 |-----------|--------|---------|
-| Ichimoku Cloud | 25 pts | Trend confirmation |
-| RSI | 15 pts | Directional momentum |
-| MACD | 35 pts | Breakout acceleration |
+| Ichimoku Cloud | 20 pts | Trend confirmation |
+| RSI | 10 pts | Directional momentum |
+| MACD | 30 pts | Breakout acceleration |
 | Bollinger Bands | 25 pts | Bandwidth expansion |
+| ADX | 15 pts | Trend strength validation |
 
 **Total: 100 points**
 

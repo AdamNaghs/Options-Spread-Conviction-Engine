@@ -6,7 +6,7 @@ Spread Conviction Engine — Unified Multi-Strategy Vertical Spread Scoring
 
 Author:     Financial Toolkit (OpenClaw)
 Created:    2026-02-09
-Version:    1.2.0
+Version:    1.2.1
 License:    MIT
 
 Description:
@@ -1250,32 +1250,39 @@ def calculate_strikes(
     """
     Calculate dynamic strikes based on 1-sigma Bollinger levels.
     Uses BBM (SMA) and bands to find logical targets.
+
+    For credit spreads (bull_put, bear_call):
+        short_strike = strike you SELL (collect premium)
+        long_strike = strike you BUY (pay premium) for protection
+
+    For debit spreads (bull_call, bear_put):
+        long_strike = strike you BUY (pay premium, directional bet)
+        short_strike = strike you SELL (collect premium) to reduce cost
     """
-    # Use BBM as a 'conservative' strike and BBU/BBL as aggressive
     if strategy == StrategyType.BULL_PUT:
-        # Sell strike near BBL (support), Long strike below
-        short = bollinger.lower
-        long = short - (price * 0.02)
-        desc = "Sell support (BBL), Buy theoretical 2% below. Round to nearest strike."
+        # SELL put at support (BBL), BUY put further OTM for protection
+        short_strike_price = bollinger.lower
+        long_strike_price = short_strike_price - (price * 0.02)
+        desc = "SELL put at support (BBL), BUY put 2% below for protection."
     elif strategy == StrategyType.BEAR_CALL:
-        # Sell strike near BBU (resistance), Long strike above
-        short = bollinger.upper
-        long = short + (price * 0.02)
-        desc = "Sell resistance (BBU), Buy theoretical 2% above. Round to nearest strike."
+        # SELL call at resistance (BBU), BUY call further OTM for protection
+        short_strike_price = bollinger.upper
+        long_strike_price = short_strike_price + (price * 0.02)
+        desc = "SELL call at resistance (BBU), BUY call 2% above for protection."
     elif strategy == StrategyType.BULL_CALL:
-        # Buy ATM/BBM, Sell BBU
-        long = bollinger.middle
-        short = bollinger.upper
-        desc = "Buy middle band (SMA), Sell theoretical resistance (BBU)."
+        # BUY call at middle band (lower strike), SELL call at upper band (higher strike)
+        long_strike_price = bollinger.middle   # Buy lower strike
+        short_strike_price = bollinger.upper   # Sell higher strike
+        desc = "BUY call at middle band (lower), SELL call at upper band (higher)."
     else:  # BEAR_PUT
-        # Buy ATM/BBM, Sell BBL
-        long = bollinger.middle
-        short = bollinger.lower
-        desc = "Buy middle band (SMA), Sell theoretical support (BBL)."
+        # BUY put at middle band (higher strike), SELL put at lower band (lower strike)
+        long_strike_price = bollinger.middle   # Buy higher strike
+        short_strike_price = bollinger.lower   # Sell lower strike
+        desc = "BUY put at middle band (higher), SELL put at lower band (lower)."
 
     return SuggestedStrikes(
-        short_strike=round(short, 2),
-        long_strike=round(long, 2),
+        short_strike=round(short_strike_price, 2),
+        long_strike=round(long_strike_price, 2),
         description=desc
     )
 
@@ -1358,7 +1365,7 @@ def build_rationale(
 
     # ADX Gate check
     if strategy.is_credit and adx.value < 20:
-        lines.append("⚠️ TREND STRENGTH GATE: ADX < 20. Credit spread capped at WATCH tier.")
+        lines.append("WARNING: TREND STRENGTH GATE: ADX < 20. Credit spread capped at WATCH tier.")
 
     # Volume check
     vol_status = "ELEVATED" if volume.is_elevated else "NORMAL"
@@ -1378,7 +1385,7 @@ def build_rationale(
     elif trend.value == "NEUTRAL":
         lines.append("Trend is neutral - mixed alignment")
     else:
-        lines.append("❌ Trend opposes strategy direction - Conflict penalty applied")
+        lines.append("ALERT: Trend opposes strategy direction - Conflict penalty applied")
     lines.append("")
 
     # Strikes
@@ -1468,63 +1475,47 @@ def analyse(
     price = round(float(df.iloc[-1]["Close"]), 2)
 
     # Step 4: Score each component (strategy-aware)
-    # We collect scores and their max weights for renormalization in case of NaNs
-    components = []
+    # We detect NaNs BEFORE scoring and renormalize if necessary.
     
-    # Ichimoku
-    try:
+    latest = df.iloc[-1]
+    
+    # 1. Ichimoku
+    ichimoku_cols = [f"ITS_{ICHIMOKU_TENKAN}", f"IKS_{ICHIMOKU_KIJUN}", f"ISA_{ICHIMOKU_TENKAN}", f"ISB_{ICHIMOKU_KIJUN}"]
+    ichimoku_available = not latest[ichimoku_cols].isna().any()
+    if ichimoku_available:
         ichimoku_sig = score_ichimoku(df, price, strategy, weights)
-        if pd.isna(ichimoku_sig.senkou_a) or pd.isna(ichimoku_sig.senkou_b):
-            ichimoku_sig.component_score = 0.0 # Mark as invalid for sum
-            ichimoku_available = False
-        else:
-            ichimoku_available = True
-    except:
-        ichimoku_available = False
+    else:
         ichimoku_sig = IchimokuSignal("UNKNOWN", "UNKNOWN", "UNKNOWN", 0, 0, 0, 0, 0, 0)
 
-    # RSI
-    try:
+    # 2. RSI
+    rsi_available = not pd.isna(latest["RSI"])
+    if rsi_available:
         rsi_sig = score_rsi(df, strategy, weights)
-        if pd.isna(rsi_sig.value):
-            rsi_available = False
-        else:
-            rsi_available = True
-    except:
-        rsi_available = False
+    else:
         rsi_sig = RSISignal(0, "UNKNOWN", 0)
 
-    # MACD
-    try:
+    # 3. MACD
+    macd_cols = [f"MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}", f"MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"]
+    macd_available = not latest[macd_cols].isna().any()
+    if macd_available:
         macd_sig = score_macd(df, price, strategy, weights)
-        if pd.isna(macd_sig.macd_value):
-            macd_available = False
-        else:
-            macd_available = True
-    except:
-        macd_available = False
+    else:
         macd_sig = MACDSignal(0, 0, 0, "UNKNOWN", "NONE", False, 0)
 
-    # Bollinger
-    try:
+    # 4. Bollinger
+    bb_suffix = f"{BBANDS_LENGTH}_{BBANDS_STD}_{BBANDS_STD}"
+    bb_cols = [f"BBL_{bb_suffix}", f"BBM_{bb_suffix}", f"BBU_{bb_suffix}"]
+    bollinger_available = not latest[bb_cols].isna().any()
+    if bollinger_available:
         bollinger_sig = score_bollinger(df, strategy, weights)
-        if pd.isna(bollinger_sig.upper):
-            bollinger_available = False
-        else:
-            bollinger_available = True
-    except:
-        bollinger_available = False
+    else:
         bollinger_sig = BollingerSignal(0, 0, 0, 0, 0, 0)
 
-    # ADX
-    try:
+    # 5. ADX
+    adx_available = not pd.isna(latest[f"ADX_{ADX_LENGTH}"])
+    if adx_available:
         adx_sig = score_adx(df, strategy, weights)
-        if pd.isna(adx_sig.value):
-            adx_available = False
-        else:
-            adx_available = True
-    except:
-        adx_available = False
+    else:
         adx_sig = ADXSignal(0, "UNKNOWN", 0)
 
     # Volume (Adjustment, not a primary component)
@@ -1533,26 +1524,40 @@ def analyse(
     # Renormalization logic
     total_score = 0.0
     total_weight_available = 0
+    available_count = 0
     
     if ichimoku_available:
         total_score += ichimoku_sig.component_score
         total_weight_available += weights.ichimoku
+        available_count += 1
     if rsi_available:
         total_score += rsi_sig.component_score
         total_weight_available += weights.rsi
+        available_count += 1
     if macd_available:
         total_score += macd_sig.component_score
         total_weight_available += weights.macd
+        available_count += 1
     if bollinger_available:
         total_score += bollinger_sig.component_score
         total_weight_available += weights.bollinger
+        available_count += 1
     if adx_available:
         total_score += adx_sig.component_score
         total_weight_available += weights.adx
+        available_count += 1
 
     if total_weight_available < 50:
         # Too much missing data
         raise ValueError(f"Insufficient valid indicator data for {ticker} (only {total_weight_available}% weight available).")
+
+    # Data Quality Flag
+    if available_count == 5:
+        data_quality = "HIGH"
+    elif available_count >= 3:
+        data_quality = "MEDIUM"
+    else:
+        data_quality = "LOW"
 
     # Scale to 100
     base_conviction = (total_score / total_weight_available) * 100.0
@@ -1610,6 +1615,7 @@ def analyse(
         adx=adx_sig,
         volume=volume_sig,
         strikes=strikes,
+        data_quality=data_quality,
         rationale=rationale,
     )
 
@@ -1628,6 +1634,7 @@ def print_report(result: ConvictionResult) -> None:
     print("=" * 70)
     print(f"  Price:       ${result.price}")
     print(f"  Trend:       {result.trend_bias}")
+    print(f"  Quality:     {result.data_quality}")
     print(f"  Conviction:  {result.conviction_score:.1f} / 100")
     print(f"  Action Tier: {result.tier}")
     print("-" * 70)
