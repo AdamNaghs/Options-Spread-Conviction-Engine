@@ -6,7 +6,7 @@ Spread Conviction Engine — Unified Multi-Strategy Vertical Spread Scoring
 
 Author:     Financial Toolkit (OpenClaw)
 Created:    2026-02-09
-Version:    1.0.0
+Version:    1.1.0
 License:    MIT
 
 Description:
@@ -20,6 +20,10 @@ Description:
     │ bull_call  │ Debit  │ Breakout         │ Strong bullish momentum        │
     │ bear_put   │ Debit  │ Breakout         │ Strong bearish momentum        │
     └────────────┴────────┴──────────────────┴────────────────────────────────┘
+
+    v1.1.0 Additions:
+    - Volume Multiplier: Cross-references relative volume (RV) to momentum.
+    - Dynamic Strike Suggestions: Recommends strikes based on Bollinger Band 1-sigma levels.
 
     This extends the original ``advanced_signals.py`` (Bull Put Spread only)
     to a general-purpose spread selection tool.  All four indicator families
@@ -94,6 +98,7 @@ MACD_SLOW: int = 26
 MACD_SIGNAL: int = 9
 BBANDS_LENGTH: int = 20
 BBANDS_STD: float = 2.0
+VOLUME_WINDOW: int = 20
 
 
 # =============================================================================
@@ -328,12 +333,34 @@ class BollingerSignal:
 
 
 @dataclass
+class VolumeSignal:
+    """
+    Volume analysis signal.
+
+    Attributes:
+        relative_volume:  Current volume / 20-day SMA volume
+        is_elevated:      True if relative_volume > 1.25
+        multiplier:       Score multiplier based on volume strength
+    """
+    relative_volume: float
+    is_elevated: bool
+    multiplier: float = 1.0
+
+
+@dataclass
+class SuggestedStrikes:
+    """
+    Dynamic strike recommendations based on volatility bands.
+    """
+    short_strike: float
+    long_strike: float
+    description: str
+
+
+@dataclass
 class ConvictionResult:
     """
     Final output of the Spread Conviction Engine.
-
-    Combines all four indicator signals into one conviction assessment
-    for the selected strategy.
 
     Attributes:
         ticker:           Symbol analysed
@@ -347,6 +374,8 @@ class ConvictionResult:
         rsi:              Detailed RSI signal
         macd:             Detailed MACD signal
         bollinger:        Detailed Bollinger signal
+        volume:           Volume strength signal
+        strikes:          Recommended short/long strikes
         rationale:        Human-readable explanation of the score
     """
     ticker: str
@@ -360,6 +389,8 @@ class ConvictionResult:
     rsi: RSISignal
     macd: MACDSignal
     bollinger: BollingerSignal
+    volume: VolumeSignal
+    strikes: SuggestedStrikes
     rationale: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -447,6 +478,15 @@ def compute_bbands(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([df, bbands_df], axis=1)
 
 
+def compute_volume_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute relative volume stats.
+    """
+    df["VOL_SMA"] = ta.sma(df["Volume"], length=VOLUME_WINDOW)
+    df["REL_VOL"] = df["Volume"] / df["VOL_SMA"]
+    return df
+
+
 def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Pipeline: compute every indicator in sequence.
@@ -457,6 +497,7 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = compute_rsi(df)
     df = compute_macd(df)
     df = compute_bbands(df)
+    df = compute_volume_stats(df)
     return df
 
 
@@ -1084,6 +1125,78 @@ def score_bollinger(
     )
 
 
+def score_volume(df: pd.DataFrame, strategy: StrategyType) -> VolumeSignal:
+    """
+    Determine volume multiplier for conviction.
+    Breakouts (debit) require high volume confirmation.
+    Mean-reversion (credit) benefits from low-volume exhaustion at levels.
+    """
+    rv = float(df.iloc[-1]["REL_VOL"])
+    elevated = rv > 1.25
+
+    # Base multiplier is 1.0
+    multiplier = 1.0
+
+    if strategy.is_debit:
+        # Debit: breakout needs volume
+        if rv > 1.5:
+            multiplier = 1.15
+        elif rv > 1.25:
+            multiplier = 1.05
+        elif rv < 0.75:
+            multiplier = 0.85
+    else:
+        # Credit: mean-reversion likes volume exhaustion (low volume)
+        if rv < 0.75:
+            multiplier = 1.10
+        elif rv > 1.5:
+            multiplier = 0.90  # Danger: high volume move against us
+
+    return VolumeSignal(
+        relative_volume=round(rv, 2),
+        is_elevated=elevated,
+        multiplier=multiplier
+    )
+
+
+def calculate_strikes(
+    price: float,
+    strategy: StrategyType,
+    bollinger: BollingerSignal
+) -> SuggestedStrikes:
+    """
+    Calculate dynamic strikes based on 1-sigma Bollinger levels.
+    Uses BBM (SMA) and bands to find logical targets.
+    """
+    # Use BBM as a 'conservative' strike and BBU/BBL as aggressive
+    if strategy == StrategyType.BULL_PUT:
+        # Sell strike near BBL (support), Long strike below
+        short = bollinger.lower
+        long = short - (price * 0.02)
+        desc = "Sell support (BBL), Buy 2% below for protection."
+    elif strategy == StrategyType.BEAR_CALL:
+        # Sell strike near BBU (resistance), Long strike above
+        short = bollinger.upper
+        long = short + (price * 0.02)
+        desc = "Sell resistance (BBU), Buy 2% above for protection."
+    elif strategy == StrategyType.BULL_CALL:
+        # Buy ATM/BBM, Sell BBU
+        long = bollinger.middle
+        short = bollinger.upper
+        desc = "Buy middle band (SMA), Sell target resistance (BBU)."
+    else:  # BEAR_PUT
+        # Buy ATM/BBM, Sell BBL
+        long = bollinger.middle
+        short = bollinger.lower
+        desc = "Buy middle band (SMA), Sell target support (BBL)."
+
+    return SuggestedStrikes(
+        short_strike=round(short, 2),
+        long_strike=round(long, 2),
+        description=desc
+    )
+
+
 # =============================================================================
 # Trend Classification (Objective — Strategy-Independent)
 # =============================================================================
@@ -1142,16 +1255,14 @@ def build_rationale(
     rsi: RSISignal,
     macd: MACDSignal,
     bollinger: BollingerSignal,
+    volume: VolumeSignal,
+    strikes: SuggestedStrikes,
     trend: TrendBias,
     score: float,
     tier: ConvictionTier,
 ) -> list[str]:
     """
     Generate a human-readable rationale explaining the conviction score.
-
-    Each line corresponds to a key observation.  This makes the score
-    transparent — the trader can always see *why* the engine scored as
-    it did, enabling informed manual override when warranted.
     """
     lines: list[str] = []
 
@@ -1160,6 +1271,15 @@ def build_rationale(
     lines.append(f"Ideal Setup: {strategy.ideal_setup}")
     lines.append("")
     lines.append(f"Market Trend: {trend.value} | Score: {score:.1f}/100 → {tier.value}")
+
+    # Volume check
+    vol_status = "ELEVATED" if volume.is_elevated else "NORMAL"
+    if strategy.is_debit and volume.is_elevated:
+        lines.append(f"🚀 Volume: {vol_status} (RV={volume.relative_volume}) — Breakthrough confirmed")
+    elif strategy.is_credit and volume.relative_volume < 0.8:
+        lines.append(f"🛡️ Volume: EXHAUSTED (RV={volume.relative_volume}) — Level holding")
+    else:
+        lines.append(f"📊 Volume: {vol_status} (RV={volume.relative_volume})")
 
     # Trend alignment check
     if strategy.is_bullish and trend.value in ("STRONG_BULL", "BULL"):
@@ -1170,6 +1290,11 @@ def build_rationale(
         lines.append("⚠️  Trend is neutral — mixed alignment")
     else:
         lines.append("⚠️  Trend opposes strategy direction — exercise caution")
+    lines.append("")
+
+    # Strikes
+    lines.append(f"📍 Suggested Strikes: ${strikes.short_strike} / ${strikes.long_strike}")
+    lines.append(f"   Logic: {strikes.description}")
     lines.append("")
 
     # Ichimoku
@@ -1215,27 +1340,6 @@ def analyse(
 ) -> ConvictionResult:
     """
     Run the full conviction analysis pipeline for a single ticker.
-
-    Pipeline Steps:
-        1. Fetch OHLCV data from Yahoo Finance
-        2. Compute all four indicator families
-        3. Score each indicator (strategy-aware)
-        4. Sum component scores → aggregate conviction (0–100)
-        5. Classify into action tier
-        6. Generate rationale
-
-    Parameters:
-        ticker:   Stock symbol
-        strategy: Spread strategy to score for (default: bull_put)
-        period:   Data lookback period (default '2y')
-        interval: Candle interval (default '1d')
-
-    Returns:
-        ConvictionResult with all signals and the final score
-
-    Raises:
-        ValueError: If data cannot be fetched
-        KeyError: If expected indicator columns are missing
     """
     weights = STRATEGY_WEIGHTS[strategy]
 
@@ -1253,24 +1357,27 @@ def analyse(
     rsi_sig = score_rsi(df, strategy, weights)
     macd_sig = score_macd(df, strategy, weights)
     bollinger_sig = score_bollinger(df, strategy, weights)
+    volume_sig = score_volume(df, strategy)
 
-    # Step 5: Aggregate
-    conviction = round(
+    # Step 5: Aggregate and apply volume multiplier
+    conviction = (
         ichimoku_sig.component_score
         + rsi_sig.component_score
         + macd_sig.component_score
-        + bollinger_sig.component_score,
-        2,
-    )
-    conviction = max(0.0, min(100.0, conviction))  # Clamp to [0, 100]
+        + bollinger_sig.component_score
+    ) * volume_sig.multiplier
+    
+    conviction = round(max(0.0, min(100.0, conviction)), 2)
 
     tier = ConvictionTier.from_score(conviction)
     trend = classify_trend(ichimoku_sig, macd_sig)
+    strikes = calculate_strikes(price, strategy, bollinger_sig)
 
     # Step 6: Rationale
     rationale = build_rationale(
         strategy, weights,
         ichimoku_sig, rsi_sig, macd_sig, bollinger_sig,
+        volume_sig, strikes,
         trend, conviction, tier,
     )
 
@@ -1286,6 +1393,8 @@ def analyse(
         rsi=rsi_sig,
         macd=macd_sig,
         bollinger=bollinger_sig,
+        volume=volume_sig,
+        strikes=strikes,
         rationale=rationale,
     )
 
@@ -1307,7 +1416,7 @@ def print_report(result: ConvictionResult) -> None:
 
     print()
     print("=" * 70)
-    print(f"  CONVICTION REPORT: {result.ticker}")
+    print(f"  CONVICTION REPORT: {result.ticker} (v1.1.0)")
     print(f"  Strategy: {result.strategy_label}")
     print("=" * 70)
     print(f"  Price:       ${result.price}")

@@ -4,13 +4,15 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-green.svg)](https://clawhub.com)
 
-**Multi-regime vertical spread analysis engine using Ichimoku, RSI, MACD, and Bollinger Bands.**
+**Multi-regime vertical spread analysis engine with Volume Multiplier and Dynamic Strike Suggestions.**
 
 A comprehensive scoring system for options traders that analyzes market conditions and provides actionable conviction scores (0-100) for four vertical spread strategies.
 
 ## 🎯 What It Does
 
-Analyzes any stock ticker and scores four vertical spread strategies:
+Analyzes any stock ticker and scores four vertical spread strategies. **v1.1.0** adds:
+- **Volume Multiplier**: Rewards breakouts with high volume and penalizes low-volume fakeouts.
+- **Dynamic Strike Suggestions**: Automatically calculates recommended short/long strikes based on 1-sigma Bollinger Band levels.
 
 | Strategy | Type | Philosophy | Ideal Setup |
 |----------|------|------------|-------------|
