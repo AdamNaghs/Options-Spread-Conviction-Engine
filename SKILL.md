@@ -294,8 +294,14 @@ Combining orthogonal signals reduces false-positive rate compared to single-indi
 conviction-engine/
 ├── scripts/
 │   ├── conviction-engine           # CLI wrapper (bash)
-│   ├── spread_conviction_engine.py # Core engine (v2.0.0)
+│   ├── spread_conviction_engine.py # Core engine (vertical spreads)
 │   ├── multi_leg_strategies.py     # Multi-leg extensions
+│   ├── quant_scanner.py            # Quantitative options scanner
+│   ├── market_scanner.py           # Technical market scanner
+│   ├── calculator.py               # Black-Scholes & POP calculator
+│   ├── position_sizer.py           # Kelly position sizing
+│   ├── chain_analyzer.py           # IV surface analyzer
+│   ├── options_math.py             # Core mathematical models
 │   └── setup-venv.sh              # Environment setup
 └── SKILL.md                        # This documentation
 ```
@@ -349,61 +355,41 @@ The skill automatically creates a virtual environment and installs:
 
 **Note:** On Python 3.14+, the engine runs in pure Python mode without numba. Performance is slightly reduced but all functionality works correctly.
 
-## Market Scanner
+## Market Scanners
 
-The **market_scanner.py** script automates the search for high-conviction EXECUTE-tier plays across entire stock universes:
+The engine includes two distinct scanning tools for different trading philosophies:
 
-### Features
-- Scans S&P 500, Nasdaq 100, or custom ticker lists
-- Tests all 7 strategies per ticker
-- Filters for EXECUTE tier (conviction ≥80)
-- Runs position sizing to ensure trades fit account guardrails
-- Rate limiting to avoid Yahoo Finance bans
-- Parallel processing support
+### 1. Technical Scanner (market_scanner.py)
+Automates the search for high-conviction plays across entire stock universes using technical indicators (Ichimoku, RSI, MACD, BB).
 
-### Usage
+#### Features
+- Scans S&P 500, Nasdaq 100, or custom ticker lists.
+- Filters for EXECUTE tier (conviction ≥80).
+- Runs position sizing to ensure trades fit account guardrails.
 
+#### Usage
 ```bash
-# Scan S&P 500
+# Scan S&P 500 for high-conviction technical setups
 python3 scripts/market_scanner.py --universe sp500
-
-# Scan Nasdaq 100 with custom rate limiting
-python3 scripts/market_scanner.py --universe ndx100 --batch-size 10 --delay 2
-
-# Custom ticker list (one ticker per line)
-python3 scripts/market_scanner.py --universe /path/to/tickers.txt
-
-# JSON output for automation
-python3 scripts/market_scanner.py --universe sp500 --json
-
-# Scan only specific strategies
-python3 scripts/market_scanner.py --universe sp500 --strategy bull_put bear_call
 ```
 
-### Output
+### 2. Quantitative Scanner (quant_scanner.py)
+A mathematically-rigorous scanner that ignores technical indicators in favor of market microstructure and probability.
 
-The scanner produces a formatted table showing:
-- Ticker, current price, strategy
-- Conviction score (≥80 for EXECUTE)
-- Suggested strikes
-- Estimated max loss/profit and POP
-- Position size recommendation
+#### Features
+- **IV Surface Analysis**: Analyzes skew and term structure.
+- **Monte Carlo POP**: 10,000-run simulations for true Probability of Profit.
+- **EV Optimization**: Finds trades with the highest risk-adjusted mathematical expectancy.
+- **Account-Aware**: Enforces small-account constraints ($100 max risk).
 
-Example:
+#### Usage
+```bash
+# Maximize POP (Probability of Profit) for SPY
+python3 scripts/quant_scanner.py SPY --mode pop
+
+# High-expectancy (EV) plays with specific DTE
+python3 scripts/quant_scanner.py AAPL TSLA --mode ev --min-dte 30
 ```
-TICKER    PRICE STRATEGY           CONV STRIKES                               MAX LOSS    POP  POS REC
-========================================================================================================
-AAPL     $185.50 bull_put          85.3 S:175.0 L:170.0                          $80   65%    1 EXECUTE
-MSFT     $420.25 iron_condor       82.1 P:400/395 C:440/445                      $95   68%    1 EXECUTE
-```
-
-### Position Sizing Integration
-
-The scanner automatically runs the position sizer on all EXECUTE-tier plays:
-- Account value: $390 (default, configurable)
-- Max risk per trade: $100 hard cap
-- Cash buffer: $150 always reserved
-- Uses Kelly criterion with quarter-Kelly adjustment
 
 ## Calculator & Position Sizer
 

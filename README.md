@@ -165,8 +165,33 @@ skills/options-spread-conviction-engine/
 │   ├── conviction-engine       # Main wrapper script
 │   ├── setup-venv.sh          # Environment setup
 │   ├── spread_conviction_engine.py  # Core engine (~1400 lines)
+│   ├── quant_scanner.py        # Quantitative options scanner
+│   ├── chain_analyzer.py       # IV surface & skew analysis
+│   ├── options_math.py         # Black-Scholes & Monte Carlo
 │   └── numba.py               # Python 3.14+ compatibility shim
 └── assets/                     # Additional resources
+```
+
+## 🧪 Quantitative Options Scanner (Alpha)
+
+The **quant_scanner.py** script provides a mathematically-rigorous alternative to the technical-indicator-heavy conviction engine. It focuses on market microstructure, IV surfaces, and probability distributions.
+
+### Features
+- **Options Chain Analysis**: Full chain fetching with IV surface, skew, and term structure analysis.
+- **Monte Carlo POP**: Calculates Probability of Profit using 10,000-run Monte Carlo simulations.
+- **Expected Value (EV)**: Scores trades based on risk-adjusted mathematical expectancy.
+- **Small Account Guardrails**: Hard-coded constraints for accounts under $500 (max $100 risk per trade).
+
+### Usage
+```bash
+# Maximize POP (Probability of Profit) for SPY
+python3 scripts/quant_scanner.py SPY --mode pop
+
+# Find income/theta plays for multiple tickers
+python3 scripts/quant_scanner.py AAPL TSLA NVDA --mode income --max-loss 100
+
+# High-expectancy (EV) plays with specific DTE
+python3 scripts/quant_scanner.py SPY --mode ev --min-dte 30 --max-dte 45
 ```
 
 ## 🔧 How It Works
