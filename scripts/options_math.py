@@ -693,19 +693,20 @@ def kelly_position_size(
 
 
 def fits_account_constraints(max_loss: float, margin_required: float = 0,
-                             account_total: float = DEFAULT_ACCOUNT_TOTAL) -> bool:
+                             account_total: float = DEFAULT_ACCOUNT_TOTAL,
+                             max_risk_per_trade: float = MAX_RISK_PER_TRADE,
+                             min_cash_buffer: float = MIN_CASH_BUFFER) -> bool:
     """
     Check if trade fits within hard account constraints
     
     account_total: Total account balance (passed via --account CLI flag)
-    Max risk per trade: $100
-    Min cash buffer: $150
+    max_risk_per_trade: Max dollar risk per trade (passed via --max-risk CLI flag)
+    min_cash_buffer: Min cash to keep in reserve (passed via --min-cash CLI flag)
     """
-    if max_loss > MAX_RISK_PER_TRADE:
+    if max_loss > max_risk_per_trade:
         return False
     
-    # Must leave $150 cash buffer
-    available = account_total - MIN_CASH_BUFFER
+    available = account_total - min_cash_buffer
     if margin_required > available:
         return False
     

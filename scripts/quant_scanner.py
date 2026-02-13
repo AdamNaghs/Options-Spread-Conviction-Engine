@@ -44,11 +44,17 @@ class QuantScanner:
     Main quantitative options scanner
     """
     
-    def __init__(self, account_total: float = DEFAULT_ACCOUNT_TOTAL):
+    def __init__(self, account_total: float = DEFAULT_ACCOUNT_TOTAL,
+                 max_risk_per_trade: float = MAX_RISK_PER_TRADE,
+                 min_cash_buffer: float = MIN_CASH_BUFFER):
         self.account_total = account_total
+        self.max_risk_per_trade = max_risk_per_trade
+        self.min_cash_buffer = min_cash_buffer
         self.fetcher = ChainFetcher(rate_limit_delay=0.3)
         self.analyzer = ChainAnalyzer(self.fetcher)
-        self.optimizer = LegOptimizer(account_total=account_total)
+        self.optimizer = LegOptimizer(account_total=account_total,
+                                      max_risk_per_trade=max_risk_per_trade,
+                                      min_cash_buffer=min_cash_buffer)
         self.vol_analyzer = VolatilityAnalyzer()
     
     def scan_ticker(self, ticker: str, mode: str = 'pop',
@@ -315,10 +321,10 @@ class QuantScanner:
             print(f"\nTickers Scanned: {len(tickers)}")
             print(f"Tickers with Opportunities: {len(results)}")
             print(f"\nAccount Constraints:")
-            available = self.account_total - MIN_CASH_BUFFER
+            available = self.account_total - self.min_cash_buffer
             print(f"  Total Account: ${self.account_total}")
             print(f"  Max Risk/Trade: ${max_loss_limit}")
-            print(f"  Min Cash Buffer: ${MIN_CASH_BUFFER}")
+            print(f"  Min Cash Buffer: ${self.min_cash_buffer}")
             print(f"  Available Capital: ${available}")
         
         return results
@@ -374,6 +380,12 @@ Examples:
     parser.add_argument('--account', type=float, default=DEFAULT_ACCOUNT_TOTAL,
                        help=f'Total account balance (default: ${DEFAULT_ACCOUNT_TOTAL:.0f})')
     
+    parser.add_argument('--max-risk', type=float, default=MAX_RISK_PER_TRADE,
+                       help=f'Maximum risk per trade in dollars (default: ${MAX_RISK_PER_TRADE:.0f})')
+    
+    parser.add_argument('--min-cash', type=float, default=MIN_CASH_BUFFER,
+                       help=f'Minimum cash buffer to keep in reserve (default: ${MIN_CASH_BUFFER:.0f})')
+    
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Verbose output')
     
@@ -393,7 +405,9 @@ Examples:
         sys.exit(1)
     
     # Run scan
-    scanner = QuantScanner(account_total=args.account)
+    scanner = QuantScanner(account_total=args.account,
+                           max_risk_per_trade=args.max_risk,
+                           min_cash_buffer=args.min_cash)
     results = scanner.scan_multiple(
         tickers=args.tickers,
         mode=args.mode,

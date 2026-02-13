@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 from options_math import (
     BlackScholes, ProbabilityCalculator, Greeks,
     fits_account_constraints, optimal_spread_width,
-    DEFAULT_ACCOUNT_TOTAL, ACCOUNT_TOTAL, MAX_RISK_PER_TRADE, AVAILABLE_CAPITAL
+    DEFAULT_ACCOUNT_TOTAL, ACCOUNT_TOTAL, MAX_RISK_PER_TRADE, MIN_CASH_BUFFER, AVAILABLE_CAPITAL
 )
 from chain_analyzer import OptionChain, ChainAnalyzer
 
@@ -182,11 +182,15 @@ class LegOptimizer:
     Optimize multi-leg option strategies
     """
     
-    def __init__(self, risk_free_rate: float = 0.045, account_total: float = DEFAULT_ACCOUNT_TOTAL):
+    def __init__(self, risk_free_rate: float = 0.045, account_total: float = DEFAULT_ACCOUNT_TOTAL,
+                 max_risk_per_trade: float = MAX_RISK_PER_TRADE,
+                 min_cash_buffer: float = MIN_CASH_BUFFER):
         self.bs = BlackScholes()
         self.calc = ProbabilityCalculator(risk_free_rate)
         self.analyzer = ChainAnalyzer()
         self.account_total = account_total
+        self.max_risk_per_trade = max_risk_per_trade
+        self.min_cash_buffer = min_cash_buffer
     
     # Minimum IV floor — pre-market/post-market data often reports near-zero IV
     # which produces 100% POP and meaningless greeks.  15% is a conservative
@@ -531,7 +535,8 @@ class LegOptimizer:
         
         # Check account fit
         strategy.fits_account = fits_account_constraints(
-            strategy.max_loss, strategy.margin_required, self.account_total
+            strategy.max_loss, strategy.margin_required, self.account_total,
+            self.max_risk_per_trade, self.min_cash_buffer
         )
         
         # Calculate total Greeks
@@ -911,7 +916,7 @@ class LegOptimizer:
         
         strategy = self.calculate_strategy_metrics(strategy, iv)
         
-        if strategy.max_loss <= MAX_RISK_PER_TRADE * 1.5:
+        if strategy.max_loss <= self.max_risk_per_trade * 1.5:
             strategies.append(strategy)
         
         return strategies
