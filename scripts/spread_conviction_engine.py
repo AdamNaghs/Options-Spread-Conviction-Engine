@@ -6,8 +6,15 @@ Spread Conviction Engine — Unified Multi-Strategy Vertical Spread Scoring
 
 Author:     Financial Toolkit (OpenClaw)
 Created:    2026-02-09
-Version:    1.2.1
+Version:    2.0.0
 License:    MIT
+
+    v2.0.0 Additions:
+    - Multi-leg strategies: Iron Condors, Butterflies, Calendar Spreads
+    - IV Rank approximation via Bollinger Bandwidth percentile
+    - IV Term Structure analysis from live options chains
+    - Squeeze detection for butterfly setups
+    - See multi_leg_strategies.py for full implementation
 
 Description:
     A unified conviction engine that scores four vertical spread strategies:
@@ -63,11 +70,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import warnings
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any, Optional
+
+# Module version — single source of truth
+__version__ = "2.0.0"
 
 import pandas as pd
 import pandas_ta as ta
@@ -432,8 +443,12 @@ def fetch_ohlcv(ticker: str, period: str = "2y", interval: str = "1d") -> pd.Dat
         pd.DataFrame with columns: Open, High, Low, Close, Volume
 
     Raises:
-        ValueError: If no data is returned for the given ticker.
+        ValueError: If no data is returned for the given ticker or invalid ticker format.
     """
+    # Validate ticker format (1-5 uppercase letters)
+    if not re.match(r'^[A-Z]{1,5}$', ticker.upper()):
+        raise ValueError(f"Invalid ticker format: '{ticker}'. Expected 1-5 uppercase letters (e.g., AAPL, SPY)")
+
     df = yf.download(ticker, period=period, interval=interval, progress=False)
 
     if df.empty:
@@ -1584,11 +1599,12 @@ def analyse(
 
     tier = ConvictionTier.from_score(conviction)
     
-    # ADX Gate: ADX < 20 caps credit spreads at WATCH
+    # ADX Gate: ADX < 20 caps credit spreads at WATCH and adjusts score
     if strategy.is_credit and adx_sig.value < 20:
         if tier in (ConvictionTier.PREPARE, ConvictionTier.EXECUTE):
             tier = ConvictionTier.WATCH
-            # We don't necessarily change the score, but we cap the tier
+            # Adjust score to tier boundary to maintain consistency
+            conviction = min(conviction, 59.9)
     
     strikes = calculate_strikes(price, strategy, bollinger_sig)
 
@@ -1629,7 +1645,7 @@ def print_report(result: ConvictionResult) -> None:
 
     print()
     print("=" * 70)
-    print(f"  CONVICTION REPORT: {result.ticker} (v1.2.0)")
+    print(f"  CONVICTION REPORT: {result.ticker} (v{__version__})")
     print(f"  Strategy: {result.strategy_label}")
     print("=" * 70)
     print(f"  Price:       ${result.price}")
@@ -1652,25 +1668,38 @@ def main() -> None:
         python3 spread_conviction_engine.py AAPL
         python3 spread_conviction_engine.py SPY --strategy bear_call
         python3 spread_conviction_engine.py QQQ AAPL --strategy bull_call --json
+        python3 spread_conviction_engine.py SPY --strategy iron_condor
+        python3 spread_conviction_engine.py AAPL --strategy butterfly
+        python3 spread_conviction_engine.py TSLA --strategy calendar --json
     """
+    # Strategy classifications for routing
+    VERTICAL_STRATEGIES = {"bull_put", "bear_call", "bull_call", "bear_put"}
+    MULTI_LEG_STRATEGIES = {"iron_condor", "butterfly", "calendar"}
+    ALL_STRATEGIES = sorted(VERTICAL_STRATEGIES | MULTI_LEG_STRATEGIES)
+
     parser = argparse.ArgumentParser(
         description=(
-            "Spread Conviction Engine — "
-            "Multi-strategy vertical spread scoring."
+            "Spread Conviction Engine v" + __version__ + " — "
+            "Multi-strategy options spread scoring."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Strategies:\n"
-            "  bull_put   Credit spread. Mean reversion: bullish dip.\n"
-            "  bear_call  Credit spread. Mean reversion: bearish rally.\n"
-            "  bull_call  Debit spread.  Breakout: bullish momentum.\n"
-            "  bear_put   Debit spread.  Breakout: bearish momentum.\n"
+            "Vertical Spreads (directional):\n"
+            "  bull_put     Credit spread. Mean reversion: bullish dip.\n"
+            "  bear_call    Credit spread. Mean reversion: bearish rally.\n"
+            "  bull_call    Debit spread.  Breakout: bullish momentum.\n"
+            "  bear_put     Debit spread.  Breakout: bearish momentum.\n"
+            "\n"
+            "Multi-Leg Strategies (non-directional / theta):\n"
+            "  iron_condor  Credit. Sell OTM put+call spreads. Range-bound, high IV.\n"
+            "  butterfly    Debit.  Buy 1 low, sell 2 mid, buy 1 high. Pinning play.\n"
+            "  calendar     Debit.  Sell front-month, buy back-month. Theta harvest.\n"
             "\n"
             "Conviction Tiers:\n"
-            "  WAIT    (0–39)   → Conditions unfavourable. Stay patient.\n"
-            "  WATCH   (40–59)  → Getting interesting. Monitor closely.\n"
-            "  PREPARE (60–79)  → Favourable. Size your trade.\n"
-            "  EXECUTE (80–100) → High conviction. Enter the spread.\n"
+            "  WAIT    (0-39)   Conditions unfavourable. Stay patient.\n"
+            "  WATCH   (40-59)  Getting interesting. Monitor closely.\n"
+            "  PREPARE (60-79)  Favourable. Size your trade.\n"
+            "  EXECUTE (80-100) High conviction. Enter the spread.\n"
         ),
     )
     parser.add_argument(
@@ -1682,8 +1711,11 @@ def main() -> None:
         "--strategy",
         type=str,
         default="bull_put",
-        choices=["bull_put", "bear_call", "bull_call", "bear_put"],
-        help="Spread strategy to score (default: bull_put)",
+        choices=ALL_STRATEGIES,
+        help=(
+            "Spread strategy to score (default: bull_put). "
+            "Use iron_condor, butterfly, or calendar for multi-leg."
+        ),
     )
     parser.add_argument(
         "--interval",
@@ -1702,20 +1734,41 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    strategy = StrategyType(args.strategy)
+    is_multi_leg = args.strategy in MULTI_LEG_STRATEGIES
 
     results = []
     for ticker in args.tickers:
         try:
-            result = analyse(
-                ticker,
-                strategy=strategy,
-                period=args.period,
-                interval=args.interval,
-            )
-            results.append(result)
-            if not args.json:
-                print_report(result)
+            if is_multi_leg:
+                # Route to multi-leg strategy engine
+                from multi_leg_strategies import (
+                    MultiLegStrategyType,
+                    analyse_multi_leg,
+                    print_multi_leg_report,
+                    MultiLegResult,
+                )
+                ml_strategy = MultiLegStrategyType(args.strategy)
+                result = analyse_multi_leg(
+                    ticker,
+                    strategy=ml_strategy,
+                    period=args.period,
+                    interval=args.interval,
+                )
+                results.append(result)
+                if not args.json:
+                    print_multi_leg_report(result)
+            else:
+                # Existing vertical spread engine
+                strategy = StrategyType(args.strategy)
+                result = analyse(
+                    ticker,
+                    strategy=strategy,
+                    period=args.period,
+                    interval=args.interval,
+                )
+                results.append(result)
+                if not args.json:
+                    print_report(result)
         except Exception as e:
             error_msg = f"Error analysing {ticker}: {e}"
             if args.json:
@@ -1726,7 +1779,7 @@ def main() -> None:
     if args.json:
         output = []
         for r in results:
-            if isinstance(r, ConvictionResult):
+            if hasattr(r, "to_dict"):
                 output.append(r.to_dict())
             else:
                 output.append(r)

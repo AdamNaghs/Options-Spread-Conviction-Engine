@@ -1,7 +1,7 @@
 ---
 name: options-spread-conviction-engine
-description: Multi-regime vertical spread analysis engine. Scores bull put, bear call, bull call, and bear put spreads using Ichimoku, RSI, MACD, and Bollinger Bands. Outputs 0-100 conviction scores with actionable recommendations.
-version: 1.2.1
+description: Multi-regime options spread analysis engine. Scores vertical spreads (bull put, bear call, bull call, bear put) and multi-leg strategies (iron condors, butterflies, calendar spreads) using Ichimoku, RSI, MACD, Bollinger Bands, and IV term structure. Outputs 0-100 conviction scores with actionable recommendations.
+version: 2.1.0
 author: Leonardo Da Pinchy
 metadata:
   openclaw:
@@ -17,12 +17,13 @@ metadata:
 
 # Options Spread Conviction Engine
 
-**Multi-regime vertical spread scoring using Ichimoku, RSI, MACD, and Bollinger Bands.**
+**Multi-regime options spread scoring using technical indicators and IV term structure analysis.**
 
 ## Overview
 
-This engine analyzes any ticker and scores four vertical spread strategies:
+This engine analyzes any ticker and scores **seven** options strategies across two categories:
 
+### Vertical Spreads (Directional)
 | Strategy | Type | Philosophy | Ideal Setup |
 |----------|------|------------|-------------|
 | **bull_put** | Credit | Mean Reversion | Bullish trend + oversold dip |
@@ -30,11 +31,20 @@ This engine analyzes any ticker and scores four vertical spread strategies:
 | **bull_call** | Debit | Breakout | Strong bullish momentum |
 | **bear_put** | Debit | Breakout | Strong bearish momentum |
 
+### Multi-Leg Strategies (Non-Directional / Theta)
+| Strategy | Type | Philosophy | Ideal Setup |
+|----------|------|------------|-------------|
+| **iron_condor** | Credit | Premium Selling | IV Rank >70, RSI neutral, range-bound |
+| **butterfly** | Debit | Pinning Play | BB squeeze, RSI center, low ADX |
+| **calendar** | Debit | Theta Harvest | Inverted IV term structure (front > back) |
+
 ## Scoring Methodology
+
+### Vertical Spreads
 
 Weights vary by strategy type (Credit = Mean Reversion, Debit = Breakout):
 
-### Credit Spreads (bull_put, bear_call)
+#### Credit Spreads (bull_put, bear_call)
 | Indicator | Weight | Purpose |
 |-----------|--------|---------|
 | Ichimoku Cloud | 25 pts | Trend structure & equilibrium |
@@ -43,7 +53,7 @@ Weights vary by strategy type (Credit = Mean Reversion, Debit = Breakout):
 | Bollinger Bands | 25 pts | Volatility regime |
 | ADX | 15 pts | Trend strength validation |
 
-### Debit Spreads (bull_call, bear_put)
+#### Debit Spreads (bull_call, bear_put)
 | Indicator | Weight | Purpose |
 |-----------|--------|---------|
 | Ichimoku Cloud | 20 pts | Trend confirmation |
@@ -52,7 +62,89 @@ Weights vary by strategy type (Credit = Mean Reversion, Debit = Breakout):
 | Bollinger Bands | 25 pts | Bandwidth expansion |
 | ADX | 15 pts | Trend strength validation |
 
-**Total: 100 points**
+### Multi-Leg Strategies
+
+#### Iron Condor (Credit / Range-Bound)
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| IV Rank (BBW %) | 25 pts | Rich premiums to sell |
+| RSI Neutrality | 20 pts | No directional momentum |
+| ADX Range-Bound | 20 pts | Weak trend = range structure |
+| Price Position | 20 pts | Centered in range = safe margins |
+| MACD Neutrality | 15 pts | No acceleration in any direction |
+
+**Triggers:**
+- IV Rank > 70: Premium-rich environment
+- RSI 40-60: Neutral momentum
+- ADX < 25: Weak/no trend
+- Price near %B center: Max profit zone maximized
+
+**Strike Selection:**
+- SELL put at 1-sigma below price (short put)
+- BUY put at 2-sigma below (long put — wing)
+- SELL call at 1-sigma above price (short call)
+- BUY call at 2-sigma above (long call — wing)
+
+**Output:**
+- All 4 strikes (put_long, put_short, call_short, call_long)
+- Max profit zone (width between short strikes)
+- Wing width
+
+#### Butterfly (Debit / Volatility Compression)
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| BB Squeeze | 30 pts | Vol compression = narrow range |
+| RSI Neutrality | 25 pts | Price at equilibrium |
+| ADX Weakness | 20 pts | No directional trend at all |
+| Price Centering | 15 pts | At center of range for max profit |
+| MACD Flatness | 10 pts | No momentum |
+
+**Triggers:**
+- BBW percentile < 25: Squeeze active
+- RSI 45-55: Dead-center (tighter than condor)
+- ADX < 20: Very weak trend
+- MACD histogram near zero
+- Price at %B = 0.50
+
+**Strike Selection:**
+- BUY 1 call at strike below center (lower wing)
+- SELL 2 calls at center strike (body)
+- BUY 1 call at strike above center (upper wing)
+
+**Output:**
+- 3 strikes (lower_long, middle_short, upper_long)
+- Max profit price (= middle strike)
+- Profit zone (approximate breakevens)
+
+#### Calendar Spread (Debit / Theta Harvesting)
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| IV Term Structure | 30 pts | Front IV > Back IV = theta edge |
+| Price Stability | 20 pts | Price stays near strike |
+| RSI Neutrality | 20 pts | Not trending away from strike |
+| ADX Moderate | 15 pts | Some structure, not trending hard |
+| MACD Neutrality | 15 pts | No directional acceleration |
+
+**Triggers:**
+- Front-month IV > Back-month IV by > 5%: Inverted term structure
+- Low recent volatility: Price stability
+- RSI neutral: No directional momentum
+- ADX 18-25: Moderate trend structure (not chaos)
+
+**Data Sources:**
+- Primary: Live options chain IV from Yahoo Finance
+- Fallback: Historical volatility proxy (HV 10-day vs 30-day)
+
+**Strike Selection:**
+- ATM strike (rounded to standard interval)
+- Front expiry: nearest available
+- Back expiry: 25+ days after front
+
+**Output:**
+- Single strike (both legs)
+- Front and back expiry dates
+- IV differential (%)
+- Theta advantage description
 
 ## Conviction Tiers
 
@@ -65,51 +157,126 @@ Weights vary by strategy type (Credit = Mean Reversion, Debit = Breakout):
 
 ## Usage
 
-### Basic Analysis
+### Vertical Spreads
+
 ```bash
+# Basic analysis (auto-detects best strategy)
 conviction-engine AAPL
+
+# Specific strategy
 conviction-engine SPY --strategy bear_call
 conviction-engine QQQ --strategy bull_call --period 2y
 ```
 
+### Multi-Leg Strategies
+
+```bash
+# Iron Condor — high IV, range-bound
+conviction-engine SPY --strategy iron_condor
+
+# Butterfly — volatility compression, pinning play
+conviction-engine AAPL --strategy butterfly
+
+# Calendar — inverted IV term structure, theta harvest
+conviction-engine TSLA --strategy calendar
+```
+
 ### Multiple Tickers
+
 ```bash
 conviction-engine AAPL MSFT GOOGL --strategy bull_put
+conviction-engine SPY QQQ IWM --strategy iron_condor
 ```
 
 ### JSON Output (for automation)
+
 ```bash
-conviction-engine TSLA --strategy bear_call --json
+conviction-engine TSLA --strategy butterfly --json
+conviction-engine SPY --strategy calendar --json | jq '.[0].iv_term_structure'
 ```
 
 ### Full Options
+
 ```bash
 conviction-engine <ticker> [ticker...]
-  --strategy {bull_put,bear_call,bull_call,bear_put}
+  --strategy {bull_put,bear_call,bull_call,bear_put,iron_condor,butterfly,calendar}
   --period {1y,2y,3y,5y}
+  --interval {1h,1d,1wk}
   --json
-  --verbose
 ```
 
-## Example Output
+## Example Outputs
+
+### Iron Condor
 
 ```
 ================================================================================
-SPY — Bull Call Spread (Debit/Breakout)
+SPY — Iron Condor (Credit)
 ================================================================================
-Price: $478.23 | Trend: BULLISH | Cloud: $462-$471
+Price: $681.27 | Score: 31.8/100 → WAIT
 
-Indicator Scores:
-  Ichimoku        22.5/25  Price above cloud, bullish TK cross
-  RSI             12.0/15  RSI=58.3, room to run
-  MACD            32.5/35  MACD above signal, rising histogram
-  Bollinger       23.1/25  %B=0.72, bandwidth stable
+[IV Rank +2.5/25]
+  IV Rank (BBW proxy): 5% (VERY_LOW)
+  BBW: 3.17 (1Y range: 2.37 - 18.13)
+  Premiums are THIN — poor risk/reward for credit
 
-CONVICTION SCORE: 90.1/100 — EXECUTE ✅
-
-Recommendation: Favorable setup for bull call spread. Strong momentum
-with cloud support. Consider 30-45 DTE strikes $480/$485.
+Strikes:
+  BUY  680.0P | SELL 685.0P
+  SELL 695.0C | BUY  700.0C
+  Max Profit Zone: $685.0 - $695.0
+  Wing Width: $5.00
 ```
+
+### Butterfly
+
+```
+================================================================================
+SPY — Long Butterfly (Debit)
+================================================================================
+Price: $681.27 | Score: 64.5/100 → PREPARE
+
+[BB Squeeze +27.0/30]
+  Bandwidth: 3.1701 (percentile: 21%)
+  SQUEEZE ACTIVE — 19 consecutive bars
+
+Strikes:
+  BUY 1x 685.0C | SELL 2x 690.0C | BUY 1x 695.0C
+  Max Profit Price: $690.0
+  Profit Zone: ~$685.0 - $695.0
+```
+
+### Calendar Spread
+
+```
+================================================================================
+SPY — Calendar Spread (Debit)
+================================================================================
+Price: $681.27 | Score: 67.2/100 → PREPARE
+
+[IV Term Structure +30.0/30]
+  Front IV: 27.5% | Back IV: 19.4%
+  Differential: +41.7%
+  INVERTED TERM STRUCTURE — calendar opportunity confirmed
+
+Strikes:
+  Strike: $680.0
+  SELL 2026-02-13 | BUY 2026-03-13
+  Theta Advantage: Front IV > Back IV by 41.7%
+```
+
+## IV Rank Approximation
+
+IV Rank is approximated using **Bollinger Bandwidth (BBW) percentile** over 252 trading days:
+
+```
+IV Rank ≈ (Current BBW - 52wk Low BBW) / (52wk High BBW - 52wk Low BBW) × 100
+```
+
+This correlation is well-documented: realized volatility (BBW) and implied volatility rank move with ~0.7-0.8 correlation (Sinclair, "Volatility Trading", 2013).
+
+## IV Term Structure
+
+For calendar spreads, the engine attempts to fetch live ATM implied volatility from Yahoo Finance options chains. If unavailable, it falls back to historical volatility term structure (HV 10-day vs HV 30-day) as a proxy.
 
 ## Academic Foundation
 
@@ -117,8 +284,50 @@ with cloud support. Consider 30-45 DTE strikes $480/$485.
 - **RSI** — Momentum oscillator (Wilder, 1978)
 - **MACD** — Trend momentum (Appel, 1979)
 - **Bollinger Bands** — Volatility envelopes (Bollinger, 2001)
+- **IV Rank / Term Structure** — Options market microstructure (Sinclair, 2013)
 
 Combining orthogonal signals reduces false-positive rate compared to single-indicator strategies (Pring, 2002; Murphy, 1999).
+
+## Architecture
+
+```
+conviction-engine/
+├── scripts/
+│   ├── conviction-engine           # CLI wrapper (bash)
+│   ├── spread_conviction_engine.py # Core engine (v2.0.0)
+│   ├── multi_leg_strategies.py     # Multi-leg extensions
+│   └── setup-venv.sh              # Environment setup
+└── SKILL.md                        # This documentation
+```
+
+### Module Separation
+
+- **spread_conviction_engine.py**: Vertical spreads, shared infrastructure (data fetching, indicator computation)
+- **multi_leg_strategies.py**: Iron condors, butterflies, calendars (imports from main engine)
+
+This separation keeps concerns clean while avoiding duplication.
+
+## Limitations & Assumptions
+
+### IV Data
+- **Yahoo Finance Limitations**: Options chains may be unavailable after market hours or for low-volume tickers
+- **Fallback**: Historical volatility (HV) proxy is less accurate than live IV but provides signal
+- **IV Rank**: Approximated from BBW; actual IV Rank requires options chain data
+
+### Strike Selection
+- **Approximation**: Strikes derived from Bollinger Band levels (1-sigma / 2-sigma)
+- **Rounding**: Rounded to standard option strike intervals based on stock price
+- **No Live Pricing**: Does not fetch live option premiums; strike selection is structural, not value-optimized
+
+### Data Quality
+- Minimum 180 trading days required for full Ichimoku cloud population
+- Multi-leg strategies require options chains (calendar spreads especially)
+- After-hours analysis may have reduced data quality
+
+### Market Assumptions
+- Assumes normal options market conditions (not extreme volatility events)
+- Strike intervals assume US equity options conventions
+- Not tested on futures, commodities, or non-US markets
 
 ## Requirements
 
@@ -138,14 +347,115 @@ The skill automatically creates a virtual environment and installs:
 - yfinance >= 1.0
 - scipy, tqdm
 
-**Note:** On Python 3.14+, the engine runs in pure Python mode without numba (numba doesn't support 3.14 yet). Performance is slightly reduced but all functionality works correctly.
+**Note:** On Python 3.14+, the engine runs in pure Python mode without numba. Performance is slightly reduced but all functionality works correctly.
+
+## Market Scanner
+
+The **market_scanner.py** script automates the search for high-conviction EXECUTE-tier plays across entire stock universes:
+
+### Features
+- Scans S&P 500, Nasdaq 100, or custom ticker lists
+- Tests all 7 strategies per ticker
+- Filters for EXECUTE tier (conviction ≥80)
+- Runs position sizing to ensure trades fit account guardrails
+- Rate limiting to avoid Yahoo Finance bans
+- Parallel processing support
+
+### Usage
+
+```bash
+# Scan S&P 500
+python3 scripts/market_scanner.py --universe sp500
+
+# Scan Nasdaq 100 with custom rate limiting
+python3 scripts/market_scanner.py --universe ndx100 --batch-size 10 --delay 2
+
+# Custom ticker list (one ticker per line)
+python3 scripts/market_scanner.py --universe /path/to/tickers.txt
+
+# JSON output for automation
+python3 scripts/market_scanner.py --universe sp500 --json
+
+# Scan only specific strategies
+python3 scripts/market_scanner.py --universe sp500 --strategy bull_put bear_call
+```
+
+### Output
+
+The scanner produces a formatted table showing:
+- Ticker, current price, strategy
+- Conviction score (≥80 for EXECUTE)
+- Suggested strikes
+- Estimated max loss/profit and POP
+- Position size recommendation
+
+Example:
+```
+TICKER    PRICE STRATEGY           CONV STRIKES                               MAX LOSS    POP  POS REC
+========================================================================================================
+AAPL     $185.50 bull_put          85.3 S:175.0 L:170.0                          $80   65%    1 EXECUTE
+MSFT     $420.25 iron_condor       82.1 P:400/395 C:440/445                      $95   68%    1 EXECUTE
+```
+
+### Position Sizing Integration
+
+The scanner automatically runs the position sizer on all EXECUTE-tier plays:
+- Account value: $390 (default, configurable)
+- Max risk per trade: $100 hard cap
+- Cash buffer: $150 always reserved
+- Uses Kelly criterion with quarter-Kelly adjustment
+
+## Calculator & Position Sizer
+
+The integrated toolchain includes:
+
+### calculator.py
+Black-Scholes options pricing with support for:
+- Single options: calls, puts
+- Vertical spreads: bull call, bear put
+- Multi-leg: iron condors, butterflies
+- Greeks calculation (delta, gamma, theta, vega, rho)
+- Monte Carlo POP simulation
+
+### position_sizer.py
+Kelly criterion position sizing adapted for small accounts:
+- Full Kelly and fractional Kelly (default 0.25)
+- Account guardrails ($390 default, $100 max risk)
+- Trade screening and ranking
+- Strike adjustment suggestions
+
+```python
+from position_sizer import calculate_position
+
+result = calculate_position(
+    account_value=390,
+    max_loss_per_spread=80,
+    win_amount=40,
+    pop=0.65,
+)
+# Returns: contracts, total_risk, recommendation, reason
+```
 
 ## Files
 
-- `scripts/conviction-engine` — Main wrapper script
-- `scripts/spread_conviction_engine.py` — Core engine
+- `scripts/conviction-engine` — Main CLI wrapper for conviction engine
+- `scripts/spread_conviction_engine.py` — Core engine (vertical spreads)
+- `scripts/multi_leg_strategies.py` — Multi-leg extensions (v2.0.0)
+- `scripts/market_scanner.py` — Automated market scanner for EXECUTE plays
+- `scripts/calculator.py` — Black-Scholes pricing, Greeks, Monte Carlo POP
+- `scripts/position_sizer.py` — Kelly criterion position sizing
 - `scripts/setup-venv.sh` — Environment setup
+- `data/sp500_tickers.txt` — S&P 500 constituents
+- `data/ndx100_tickers.txt` — Nasdaq 100 constituents
 - `assets/` — Documentation and examples
+
+## Version History
+
+- **v2.1.0** (2026-02-12): Added market scanner, integrated calculator and position sizer
+- **v2.0.0** (2026-02-12): Added multi-leg strategies (iron condor, butterfly, calendar)
+- **v1.2.1** (2026-02-09): Volume multiplier, dynamic strike suggestions
+- **v1.1.0** (2026-02-08): Cross-signal weighting, multi-strategy support
+- **v1.0.0** (2026-02-07): Initial bull put spread engine
 
 ## License
 
