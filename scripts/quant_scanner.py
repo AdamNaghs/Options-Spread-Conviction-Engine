@@ -25,10 +25,10 @@ Account Constraints:
 """
 
 import argparse
+import re
 import sys
 import json
-from typing import List, Optional
-from datetime import datetime
+from typing import List, Optional, Protocol, runtime_checkable
 
 from options_math import (
     BlackScholes, ProbabilityCalculator, VolatilityAnalyzer,
@@ -39,6 +39,54 @@ from chain_analyzer import ChainFetcher, ChainAnalyzer, OptionChain
 from leg_optimizer import LegOptimizer, MultiLegStrategy, validate_strategy_risk
 
 
+VALID_SPREAD_TYPES = {'put_credit', 'call_credit', 'put_debit', 'call_debit'}
+
+# Ticker validation: standard equity/options format only
+_TICKER_PATTERN = re.compile(r'^[A-Z0-9.\-=]+$')
+
+
+@runtime_checkable
+class ChainFetcherProtocol(Protocol):
+    """Protocol for options chain data fetchers.
+
+    Any object implementing these methods can be used as the fetcher
+    dependency in QuantScanner, enabling test doubles and alternative
+    data sources.
+    """
+
+    def fetch_quote(self, ticker: str) -> Optional[dict]: ...
+
+    def fetch_multiple_expirations(
+        self, ticker: str, num_expirations: int = 4,
+        min_dte: int = 7, max_dte: int = 45
+    ) -> list: ...
+
+
+def validate_tickers(tickers: List[str]) -> List[str]:
+    """Validate ticker symbols against safe pattern.
+
+    Rejects symbols containing path separators, shell metacharacters,
+    or other characters outside the standard equity/options ticker format.
+
+    Returns the validated list (uppercased).
+    Raises ValueError on invalid ticker.
+    """
+    validated = []
+    for raw in tickers:
+        t = raw.strip().upper()
+        if not t:
+            raise ValueError(f"Empty ticker symbol: {raw!r}")
+        if not _TICKER_PATTERN.match(t):
+            raise ValueError(
+                f"Invalid ticker symbol: {raw!r}. "
+                "Tickers must match ^[A-Z0-9.=-]+$ (no spaces, slashes, or shell characters)."
+            )
+        if len(t) > 20:
+            raise ValueError(f"Ticker symbol too long: {raw!r} ({len(t)} chars, max 20)")
+        validated.append(t)
+    return validated
+
+
 class QuantScanner:
     """
     Main quantitative options scanner
@@ -46,15 +94,19 @@ class QuantScanner:
     
     def __init__(self, account_total: float = DEFAULT_ACCOUNT_TOTAL,
                  max_risk_per_trade: float = MAX_RISK_PER_TRADE,
-                 min_cash_buffer: float = MIN_CASH_BUFFER):
+                 min_cash_buffer: float = MIN_CASH_BUFFER,
+                 fetcher: Optional[ChainFetcherProtocol] = None,
+                 analyzer: Optional[ChainAnalyzer] = None,
+                 optimizer: Optional[LegOptimizer] = None):
         self.account_total = account_total
         self.max_risk_per_trade = max_risk_per_trade
         self.min_cash_buffer = min_cash_buffer
-        self.fetcher = ChainFetcher(rate_limit_delay=0.3)
-        self.analyzer = ChainAnalyzer(self.fetcher)
-        self.optimizer = LegOptimizer(account_total=account_total,
-                                      max_risk_per_trade=max_risk_per_trade,
-                                      min_cash_buffer=min_cash_buffer)
+        self.fetcher = fetcher or ChainFetcher(rate_limit_delay=0.3)
+        self.analyzer = analyzer or ChainAnalyzer(self.fetcher)
+        self.optimizer = optimizer or LegOptimizer(
+            account_total=account_total,
+            max_risk_per_trade=max_risk_per_trade,
+            min_cash_buffer=min_cash_buffer)
         self.vol_analyzer = VolatilityAnalyzer()
     
     def scan_ticker(self, ticker: str, mode: str = 'pop',
@@ -156,44 +208,28 @@ class QuantScanner:
                 print(f"\nNo valid strategies after risk validation for {ticker}")
             return None
         
-        # Filter by minimum spread width
-        if min_width > 1.0:
-            width_filtered = []
-            for s in all_strategies:
-                strikes = [leg.strike for leg in s.legs]
-                if len(strikes) >= 2:
-                    width = max(strikes) - min(strikes)
-                    if width >= min_width:
-                        width_filtered.append(s)
-                else:
-                    width_filtered.append(s)
-            if verbose:
-                print(f"  Width filter (>= ${min_width:.0f}): {len(all_strategies)} → {len(width_filtered)}")
-            all_strategies = width_filtered
+        # Filter by spread width (min and max)
+        def _calc_width(strategy, underlying_price: float) -> float:
+            """Calculate strategy width. For single-leg, use distance from underlying."""
+            strikes = [leg.strike for leg in strategy.legs]
+            if len(strikes) >= 2:
+                return max(strikes) - min(strikes)
+            elif len(strikes) == 1:
+                return abs(strikes[0] - underlying_price)
+            return 0.0
+
+        width_filtered = []
+        for s in all_strategies:
+            width = _calc_width(s, price)
+            if width >= min_width and width <= max_width:
+                width_filtered.append(s)
+        if verbose and len(width_filtered) != len(all_strategies):
+            print(f"  Width filter (${min_width:.0f}-${max_width:.0f}): {len(all_strategies)} → {len(width_filtered)}")
+        all_strategies = width_filtered
         
         if not all_strategies:
             if verbose:
                 print(f"\nNo strategies after width filter for {ticker}")
-            return None
-        
-        # Filter by maximum spread width
-        if max_width < 5.0:
-            max_width_filtered = []
-            for s in all_strategies:
-                strikes = [leg.strike for leg in s.legs]
-                if len(strikes) >= 2:
-                    width = max(strikes) - min(strikes)
-                    if width <= max_width:
-                        max_width_filtered.append(s)
-                else:
-                    max_width_filtered.append(s)
-            if verbose:
-                print(f"  Max width filter (<= ${max_width:.0f}): {len(all_strategies)} → {len(max_width_filtered)}")
-            all_strategies = max_width_filtered
-        
-        if not all_strategies:
-            if verbose:
-                print(f"\nNo strategies after max width filter for {ticker}")
             return None
         
         if verbose:
@@ -288,6 +324,7 @@ class QuantScanner:
         """
         Scan multiple tickers and return aggregated results
         """
+        tickers = validate_tickers(tickers)
         results = []
         
         if not json_output:
@@ -368,10 +405,10 @@ Examples:
     parser.add_argument('--min-pop', type=float, default=0.0,
                        help='Minimum Probability of Profit %% (default: 0)')
     
-    parser.add_argument('--min-width', type=int, default=1,
+    parser.add_argument('--min-width', type=float, default=1.0,
                        help='Minimum spread width in dollars (default: 1)')
     
-    parser.add_argument('--max-width', type=int, default=5,
+    parser.add_argument('--max-width', type=float, default=5.0,
                        help='Maximum spread width in dollars (default: 5)')
     
     parser.add_argument('--json', '-j', action='store_true',
@@ -396,12 +433,28 @@ Examples:
         print("ERROR: DTE must be between 0 and 365")
         sys.exit(1)
     
-    if args.min_pop < 0 or args.min_pop > 100:
-        print("ERROR: Min POP must be between 0 and 100")
+    if args.min_dte > args.max_dte:
+        print(f"ERROR: min-dte ({args.min_dte}) cannot exceed max-dte ({args.max_dte})")
+        sys.exit(1)
+    
+    if not (0 <= args.min_pop <= 100):
+        print("ERROR: Min POP must be between 0 and 100 (inclusive)")
+        sys.exit(1)
+    
+    if args.account <= 0:
+        print("ERROR: Account balance must be positive")
+        sys.exit(1)
+    
+    if args.max_loss <= 0:
+        print("ERROR: Max loss must be positive")
         sys.exit(1)
     
     if args.max_loss > args.account:
         print(f"ERROR: Max loss cannot exceed account total (${args.account:.0f})")
+        sys.exit(1)
+    
+    if args.min_width > args.max_width:
+        print(f"ERROR: min-width ({args.min_width}) cannot exceed max-width ({args.max_width})")
         sys.exit(1)
     
     # Run scan
@@ -414,27 +467,17 @@ Examples:
         min_dte=args.min_dte,
         max_dte=args.max_dte,
         max_loss_limit=args.max_loss,
-        min_pop=args.min_pop / 100.0,  # Convert % to decimal
-        min_width=float(args.min_width),
-        max_width=float(args.max_width),
+        min_pop=args.min_pop / 100.0,  # Convert percentage to decimal
+        min_width=args.min_width,
+        max_width=args.max_width,
         json_output=args.json
     )
     
     if args.json:
         print(json.dumps(results, indent=2))
     
-    # Exit with appropriate code
-    if not results:
-        sys.exit(1)
-    
-    # Check if any executable trades found
-    executable = any(
-        any(s.get('fits_account') and s.get('pop', 0) > 0.6 
-            for s in r.get('strategies', []))
-        for r in results
-    )
-    
-    sys.exit(0 if executable else 1)
+    # Exit 0 if any results found, 1 if no viable strategies at all
+    sys.exit(0 if results else 1)
 
 
 if __name__ == '__main__':

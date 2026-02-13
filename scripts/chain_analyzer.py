@@ -5,8 +5,6 @@ Fetches and parses options chains from Yahoo Finance.
 Handles caching, rate limiting, and data normalization.
 """
 
-import subprocess
-import json
 import time
 import logging
 from datetime import datetime, timedelta
@@ -15,6 +13,8 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 import os
 import pickle
+
+import yfinance
 
 logger = logging.getLogger(__name__)
 
@@ -107,27 +107,20 @@ class ChainFetcher:
             pass
     
     def fetch_quote(self, ticker: str) -> Optional[Dict]:
-        """Fetch current stock quote"""
+        """Fetch current stock quote via yfinance"""
         self._rate_limit()
         
         try:
-            result = subprocess.run(
-                ['yf', 'quote', ticker],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            
-            if result.returncode != 0:
+            info = yfinance.Ticker(ticker).info
+            if not info or 'regularMarketPrice' not in info:
                 return None
-            
-            return json.loads(result.stdout)
+            return info
         except Exception as e:
             print(f"Error fetching quote for {ticker}: {e}")
             return None
     
     def fetch_expirations(self, ticker: str) -> List[Dict]:
-        """Fetch available expiration dates"""
+        """Fetch available expiration dates via yfinance"""
         cache_key = self._get_cache_key(ticker)
         cached = self._load_from_cache(cache_key)
         
@@ -137,27 +130,20 @@ class ChainFetcher:
         self._rate_limit()
         
         try:
-            result = subprocess.run(
-                ['yf', 'options', ticker],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
+            tk = yfinance.Ticker(ticker)
+            date_strings = tk.options  # tuple of 'YYYY-MM-DD' strings
             
-            if result.returncode != 0:
+            if not date_strings:
                 return []
             
-            data = json.loads(result.stdout)
-            
             expirations = []
-            for date_str in data.get('expirationDates', []):
+            for date_str in date_strings:
                 try:
-                    # Parse date string
-                    dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S.%fZ')
+                    dt = datetime.strptime(date_str, '%Y-%m-%d')
                     timestamp = int(dt.timestamp())
                     dte = (dt.date() - datetime.now().date()).days
                     
-                    if dte >= 0:  # Only future dates
+                    if dte >= 0:
                         expirations.append({
                             'date': date_str,
                             'timestamp': timestamp,
@@ -167,10 +153,7 @@ class ChainFetcher:
                 except:
                     continue
             
-            # Sort by DTE
             expirations.sort(key=lambda x: x['dte'])
-            
-            # Cache
             self._save_to_cache(cache_key, {'expirations': expirations})
             
             return expirations
@@ -180,7 +163,7 @@ class ChainFetcher:
             return []
     
     def fetch_chain_for_date(self, ticker: str, timestamp: int) -> Optional[OptionChain]:
-        """Fetch options chain for specific expiration date"""
+        """Fetch options chain for specific expiration date via yfinance"""
         cache_key = self._get_cache_key(ticker, timestamp)
         cached = self._load_from_cache(cache_key)
 
@@ -190,80 +173,52 @@ class ChainFetcher:
         self._rate_limit()
 
         try:
-            # Convert timestamp to date string for yf tool
-            # Yahoo expects YYYY-MM-DD format
             date_dt = datetime.fromtimestamp(timestamp)
             date_str = date_dt.strftime('%Y-%m-%d')
 
-            result = subprocess.run(
-                ['yf', 'options', ticker, json.dumps({'date': date_str})],
-                capture_output=True,
-                text=True,
-                timeout=15
-            )
-
-            if result.returncode != 0:
-                return None
-
-            data = json.loads(result.stdout)
+            tk = yfinance.Ticker(ticker)
 
             # Get underlying price
-            underlying = data.get('quote', {}).get('regularMarketPrice', 0)
-            if underlying == 0:
-                underlying = data.get('underlyingPrice', 0)
+            underlying = tk.info.get('regularMarketPrice', 0) or 0
 
-            # Find matching expiration from the options data
-            options_list = data.get('options', [])
-            if not options_list:
+            # Fetch option chain for this date
+            opt_chain = tk.option_chain(date_str)
+
+            if opt_chain.calls.empty and opt_chain.puts.empty:
                 return None
 
-            options_data = options_list[0]
-            expiration_date = options_data.get('expirationDate')
-
-            if not expiration_date:
-                return None
-
-            # Parse expiration date for DTE calculation
-            try:
-                exp_dt = datetime.strptime(expiration_date, '%Y-%m-%dT%H:%M:%S.%fZ')
-                dte = (exp_dt.date() - datetime.now().date()).days
-            except:
-                # Fallback DTE calculation from input timestamp
-                dte = (date_dt.date() - datetime.now().date()).days
+            dte = (date_dt.date() - datetime.now().date()).days
 
             calls = self._normalize_options(
-                options_data.get('calls', []),
+                opt_chain.calls.to_dict('records'),
                 'call',
                 underlying,
-                expiration_date,
+                date_str,
                 dte
             )
 
             puts = self._normalize_options(
-                options_data.get('puts', []),
+                opt_chain.puts.to_dict('records'),
                 'put',
                 underlying,
-                expiration_date,
+                date_str,
                 dte
             )
 
-            # If no options found, return None
             if not calls and not puts:
                 return None
 
             chain = OptionChain(
                 ticker=ticker,
                 underlying_price=underlying,
-                expiration_date=expiration_date,
+                expiration_date=date_str,
                 expiration_timestamp=timestamp,
                 dte=dte,
                 calls=calls,
                 puts=puts
             )
 
-            # Cache
             self._save_to_cache(cache_key, chain.__dict__)
-
             return chain
 
         except Exception as e:
@@ -277,12 +232,31 @@ class ChainFetcher:
 
         for opt in options:
             # Handle missing values gracefully
+            # yfinance uses camelCase: lastPrice, openInterest, impliedVolatility
             bid = opt.get('bid', 0) or 0
             ask = opt.get('ask', 0) or 0
-            last = opt.get('lastPrice', 0) or 0
+            last = opt.get('lastPrice', opt.get('lastprice', 0)) or 0
             volume = opt.get('volume', 0) or 0
-            oi = opt.get('openInterest', 0) or 0
-            iv = opt.get('impliedVolatility', 0) or 0
+            oi = opt.get('openInterest', opt.get('openinterest', 0)) or 0
+            iv = opt.get('impliedVolatility', opt.get('impliedvolatility', 0)) or 0
+            strike = opt.get('strike', 0) or 0
+            
+            # Handle NaN values from pandas/yfinance
+            import math
+            def safe_num(val, default=0):
+                if val is None:
+                    return default
+                if isinstance(val, float) and math.isnan(val):
+                    return default
+                return val
+            
+            bid = safe_num(bid)
+            ask = safe_num(ask)
+            last = safe_num(last)
+            volume = safe_num(volume)
+            oi = safe_num(oi)
+            iv = safe_num(iv)
+            strike = safe_num(strike)
 
             # Yahoo returns IV as decimal (e.g., 0.25 for 25%)
             if iv > 1:
@@ -345,8 +319,7 @@ class ChainFetcher:
     
     def fetch_default_chain(self, ticker: str) -> Optional[OptionChain]:
         """
-        Fetch the default options chain (nearest expiration)
-        This works reliably with yf tool
+        Fetch the default options chain (nearest expiration) via yfinance
         """
         cache_key = self._get_cache_key(ticker, 'default')
         cached = self._load_from_cache(cache_key)
@@ -357,67 +330,53 @@ class ChainFetcher:
         self._rate_limit()
         
         try:
-            result = subprocess.run(
-                ['yf', 'options', ticker],
-                capture_output=True,
-                text=True,
-                timeout=15
-            )
+            tk = yfinance.Ticker(ticker)
             
-            if result.returncode != 0:
+            # Get available expirations
+            exp_dates = tk.options
+            if not exp_dates:
                 return None
             
-            data = json.loads(result.stdout)
+            # Use nearest expiration
+            nearest_date = exp_dates[0]
             
             # Get underlying price
-            underlying = data.get('quote', {}).get('regularMarketPrice', 0)
-            if underlying == 0:
-                underlying = data.get('underlyingPrice', 0)
+            underlying = tk.info.get('regularMarketPrice', 0) or 0
             
-            # Get expiration from options data
-            options_list = data.get('options', [])
-            if not options_list:
-                return None
+            # Fetch chain
+            opt_chain = tk.option_chain(nearest_date)
             
-            options_data = options_list[0]
-            expiration_date = options_data.get('expirationDate')
-            
-            if not expiration_date:
-                return None
-            
-            exp_dt = datetime.strptime(expiration_date, '%Y-%m-%dT%H:%M:%S.%fZ')
+            exp_dt = datetime.strptime(nearest_date, '%Y-%m-%d')
             dte = (exp_dt.date() - datetime.now().date()).days
             timestamp = int(exp_dt.timestamp())
             
             calls = self._normalize_options(
-                options_data.get('calls', []), 
-                'call', 
+                opt_chain.calls.to_dict('records'),
+                'call',
                 underlying,
-                expiration_date,
+                nearest_date,
                 dte
             )
             
             puts = self._normalize_options(
-                options_data.get('puts', []),
+                opt_chain.puts.to_dict('records'),
                 'put',
                 underlying,
-                expiration_date,
+                nearest_date,
                 dte
             )
             
             chain = OptionChain(
                 ticker=ticker,
                 underlying_price=underlying,
-                expiration_date=expiration_date,
+                expiration_date=nearest_date,
                 expiration_timestamp=timestamp,
                 dte=dte,
                 calls=calls,
                 puts=puts
             )
             
-            # Cache
             self._save_to_cache(cache_key, chain.__dict__)
-            
             return chain
             
         except Exception as e:
