@@ -288,12 +288,85 @@ class ProbabilityCalculator:
             # Profit when price stays above breakeven (call debit) or above (put credit)
             return 1 - norm.cdf(z)
     
+    def monte_carlo_pop_iron_condor(self, S: float, lower_be: float, upper_be: float,
+                                     T: float, sigma: float, n_sims: int = 100000,
+                                     steps_per_day: int = 1) -> float:
+        """
+        Monte Carlo simulation for Iron Condor Probability of Profit.
+
+        Unlike Black-Scholes which calculates probability AT expiration only,
+        this simulates price paths and checks if price stays within bounds
+        at ANY point ("touch" probability). Early touch of breakeven = loss.
+
+        Uses Geometric Brownian Motion: dS/S = r*dt + sigma*sqrt(dt)*Z
+
+        This matches how Tastytrade and other professional platforms calculate
+        POP for Iron Condors, accounting for early breach risk.
+
+        Args:
+            S: Current underlying price
+            lower_be: Lower breakeven price (put side)
+            upper_be: Upper breakeven price (call side)
+            T: Time to expiration in years
+            sigma: Implied volatility (annualized)
+            n_sims: Number of Monte Carlo simulations (default 100,000)
+            steps_per_day: Number of time steps per trading day (default 1)
+
+        Returns:
+            Probability of profit (0.0 to 1.0) - proportion of paths that
+            never touched either breakeven during the entire period.
+        """
+        if T <= 0 or sigma <= 0 or lower_be >= upper_be or S <= 0:
+            return 0.5
+
+        # Ensure reasonable bounds
+        lower_be = max(lower_be, S * 0.5)  # Sanity check
+        upper_be = min(upper_be, S * 2.0)  # Sanity check
+
+        # Trading days to expiration (252 trading days per year)
+        trading_days = max(int(T * 252), 1)
+        n_steps = trading_days * steps_per_day
+        dt = T / n_steps
+
+        # Set random seed for reproducibility
+        np.random.seed(42)
+
+        # Geometric Brownian Motion parameters
+        # dS/S = r*dt + sigma*sqrt(dt)*Z
+        drift = (self.r - 0.5 * sigma**2) * dt
+        diffusion = sigma * np.sqrt(dt)
+
+        # Initialize all paths at current price
+        # Shape: (n_sims,) - current price for each simulation
+        prices = np.full(n_sims, S, dtype=np.float64)
+
+        # Track which paths have remained within bounds (initially all True)
+        in_bounds = np.ones(n_sims, dtype=bool)
+
+        # Simulate path evolution step by step
+        for _ in range(n_steps):
+            # Generate random shocks for this step (only for paths still in bounds)
+            Z = np.random.standard_normal(n_sims)
+
+            # Update prices using GBM: S_t+1 = S_t * exp((r - 0.5*sigma^2)*dt + sigma*sqrt(dt)*Z)
+            prices = prices * np.exp(drift + diffusion * Z)
+
+            # Check for breaches - paths that exit bounds are marked as out
+            in_bounds = in_bounds & (prices > lower_be) & (prices < upper_be)
+
+            # Early termination optimization: if all paths have breached, stop early
+            if not np.any(in_bounds):
+                return 0.0
+
+        # POP = proportion of paths that never touched either breakeven
+        return np.mean(in_bounds)
+
     def expected_value(self, pop: float, max_profit: float, max_loss: float) -> float:
         """
         Calculate Expected Value of a trade
-        
+
         EV = (POP × max_profit) - ((1-POP) × max_loss)
-        
+
         Returns 0.0 if inputs are non-finite or POP is out of range.
         """
         if not (np.isfinite(pop) and np.isfinite(max_profit) and np.isfinite(max_loss)):
@@ -414,6 +487,209 @@ class VolatilityAnalyzer:
         
         # Annualized slope
         return (short_iv - long_iv) / long_iv * 100
+
+
+##############################################################################
+# Kelly Criterion for Options Trading
+##############################################################################
+
+@dataclass
+class KellyResult:
+    """Result of Kelly criterion position sizing calculation.
+
+    Attributes:
+        full_kelly_fraction: Raw Kelly optimal fraction of bankroll to risk (f*).
+        half_kelly_fraction: Half-Kelly fraction (conservative default for options).
+        edge: Estimated edge = EV / max_loss.  Positive means +EV trade.
+        recommended_contracts: Integer number of contracts to trade.
+        recommended_risk: Dollar amount to risk (contracts × max_loss per contract).
+        reason: Human-readable explanation of the sizing decision.
+    """
+    full_kelly_fraction: float
+    half_kelly_fraction: float
+    adjusted_kelly_fraction: float
+    edge: float
+    recommended_contracts: int
+    recommended_risk: float
+    reason: str
+
+
+def kelly_fraction(p: float, b: float) -> float:
+    """Compute the full Kelly fraction f* = (p*b - q) / b.
+
+    This is the *growth-optimal* fraction of bankroll to wager on a single
+    binary bet that pays *b*-to-1 when you win with probability *p*.
+
+    For a vertical spread the mapping is:
+        p  = Probability of Profit (POP)
+        b  = max_profit / max_loss   (reward-to-risk ratio)
+
+    Parameters
+    ----------
+    p : float  – win probability, must be in (0, 1).
+    b : float  – ratio of net profit on win to net loss on loss (> 0).
+
+    Returns
+    -------
+    float – Kelly fraction.  Can be negative (meaning the trade has
+            negative expected value and should be avoided).
+    """
+    if b <= 0 or not (0.0 <= p <= 1.0):
+        return 0.0
+    q = 1.0 - p
+    return (p * b - q) / b
+
+
+def calculate_edge(pop: float, max_profit: float, max_loss: float) -> float:
+    """Compute the *edge* of a trade as EV per dollar risked.
+
+    edge = (POP × max_profit  –  (1-POP) × max_loss) / max_loss
+
+    A positive edge means the trade has positive expected value.
+    An edge of 0.10 means you expect to make $0.10 per $1.00 risked.
+
+    Parameters
+    ----------
+    pop        : float – probability of profit [0, 1].
+    max_profit : float – maximum profit in dollars (positive).
+    max_loss   : float – maximum loss in dollars (positive).
+
+    Returns
+    -------
+    float – edge per dollar risked.  Negative ⇒ –EV trade.
+    """
+    if max_loss <= 0 or not np.isfinite(max_loss):
+        return 0.0
+    if not (0.0 <= pop <= 1.0):
+        return 0.0
+    if max_profit < 0 or not np.isfinite(max_profit):
+        return 0.0
+    ev = pop * max_profit - (1.0 - pop) * max_loss
+    return ev / max_loss
+
+
+def kelly_position_size(
+    pop: float,
+    max_profit: float,
+    max_loss: float,
+    account_balance: float = DEFAULT_ACCOUNT_TOTAL,
+    max_risk_per_trade: float = MAX_RISK_PER_TRADE,
+    cash_buffer: float = MIN_CASH_BUFFER,
+    kelly_multiplier: float = 0.5,
+    max_kelly_cap: float = 0.25,
+) -> KellyResult:
+    """Full Kelly-criterion position sizer for vertical spreads.
+
+    Workflow
+    --------
+    1. Validate inputs and compute edge.
+    2. Compute full Kelly fraction  f* = (p·b − q) / b.
+    3. Apply *kelly_multiplier* (default 0.5 = half-Kelly) for volatility
+       safety margin.  Half-Kelly sacrifices ~25 % of geometric growth but
+       cuts variance in half — widely recommended for options.
+    4. Cap the fraction at *max_kelly_cap* (default 25 % of bankroll) to
+       prevent ruin from model mis-estimation.
+    5. Convert fraction → dollar risk → integer contracts, respecting
+       account constraints (available capital, per-trade risk limit).
+
+    Parameters
+    ----------
+    pop                : float – probability of profit [0, 1].
+    max_profit         : float – max profit per contract in $ (positive).
+    max_loss           : float – max loss per contract in $ (positive).
+    account_balance    : float – total account equity.
+    max_risk_per_trade : float – hard dollar cap on risk for any single trade.
+    cash_buffer        : float – minimum cash to keep in reserve.
+    kelly_multiplier   : float – fraction of full Kelly to use (0.5 = half).
+    max_kelly_cap      : float – ceiling on Kelly fraction (e.g. 0.25 = 25 %).
+
+    Returns
+    -------
+    KellyResult with sizing details and reasoning.
+    """
+
+    # ------------------------------------------------------------------
+    # 0. Input sanitisation
+    # ------------------------------------------------------------------
+    pop = float(np.clip(pop, 0.0, 1.0))
+    max_profit = float(max(max_profit, 0.0))
+    max_loss = float(max(max_loss, 0.0))
+
+    if max_loss <= 0:
+        return KellyResult(0.0, 0.0, 0.0, 0.0, 0, 0.0,
+                           "Max loss is zero or negative — cannot size.")
+
+    available_capital = max(account_balance - cash_buffer, 0.0)
+    if available_capital <= 0:
+        return KellyResult(0.0, 0.0, 0.0, 0.0, 0, 0.0,
+                           "No available capital after cash buffer.")
+
+    # ------------------------------------------------------------------
+    # 1. Edge & Kelly fraction
+    # ------------------------------------------------------------------
+    edge = calculate_edge(pop, max_profit, max_loss)
+    b = max_profit / max_loss  # reward-to-risk ratio
+    f_full = kelly_fraction(pop, b)
+
+    # ------------------------------------------------------------------
+    # 2. Negative or zero edge → do not trade
+    # ------------------------------------------------------------------
+    if edge <= 0 or f_full <= 0:
+        return KellyResult(
+            full_kelly_fraction=max(f_full, 0.0),
+            half_kelly_fraction=0.0,
+            adjusted_kelly_fraction=0.0,
+            edge=edge,
+            recommended_contracts=0,
+            recommended_risk=0.0,
+            reason=f"Negative/zero edge ({edge:+.4f}). Kelly says pass.",
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Apply safety multiplier & cap
+    # ------------------------------------------------------------------
+    f_adjusted = f_full * kelly_multiplier
+    f_adjusted = min(f_adjusted, max_kelly_cap)
+    f_adjusted = max(f_adjusted, 0.0)
+
+    # ------------------------------------------------------------------
+    # 4. Convert to dollars & contracts
+    # ------------------------------------------------------------------
+    kelly_risk_dollars = f_adjusted * available_capital
+
+    # Enforce hard per-trade risk limit
+    risk_dollars = min(kelly_risk_dollars, max_risk_per_trade, available_capital)
+
+    # Integer contracts (each contract risks max_loss dollars)
+    contracts = int(risk_dollars // max_loss) if max_loss > 0 else 0
+    contracts = max(contracts, 0)
+
+    actual_risk = contracts * max_loss
+
+    # ------------------------------------------------------------------
+    # 5. Build reason string
+    # ------------------------------------------------------------------
+    parts = []
+    parts.append(f"Edge {edge:+.4f}")
+    parts.append(f"Full Kelly {f_full:.2%}")
+    parts.append(f"Half Kelly {f_full * 0.5:.2%}")
+    parts.append(f"Adj fraction {f_adjusted:.2%}")
+    parts.append(f"Kelly risk ${kelly_risk_dollars:.0f}")
+    if kelly_risk_dollars > max_risk_per_trade:
+        parts.append(f"capped to ${max_risk_per_trade:.0f} per-trade limit")
+    if contracts == 0 and risk_dollars > 0:
+        parts.append("max_loss exceeds available risk — 0 contracts")
+    parts.append(f"→ {contracts} contract(s) risking ${actual_risk:.0f}")
+
+    return KellyResult(
+        full_kelly_fraction=f_full,
+        half_kelly_fraction=f_full * 0.5,
+        adjusted_kelly_fraction=f_adjusted,
+        edge=edge,
+        recommended_contracts=contracts,
+        recommended_risk=actual_risk,
+        reason=" | ".join(parts),
+    )
 
 
 def fits_account_constraints(max_loss: float, margin_required: float = 0,

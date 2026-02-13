@@ -1,11 +1,11 @@
 {
   "name": "options-spread-conviction-engine",
-  "version": "2.1.0",
-  "description": "Multi-regime vertical spread analysis engine with Volume Multiplier and Dynamic Strike Suggestions",
+  "version": "2.2.0",
+  "description": "Multi-regime options spread analysis engine with Kelly Criterion Position Sizing, Multi-Leg Strategies (iron condor, butterfly, calendar), and Quantitative Scanning. Scores vertical spreads using Ichimoku, RSI, MACD, Bollinger Bands, and IV term structure with mathematically-optimal position sizing.",
   "author": "Adam Naghavi & Leonardo Da Pinchy",
   "homepage": "https://github.com/AdamNaghs/Options-Spread-Conviction-Engine",
   "license": "MIT",
-  "keywords": ["options", "trading", "analysis", "ichimoku", "rsi", "macd", "bollinger", "black-scholes", "quantitative", "scanner", "position-sizing", "kelly-criterion", "multi-leg"],
+  "keywords": ["options", "trading", "analysis", "ichimoku", "rsi", "macd", "bollinger", "black-scholes", "quantitative", "scanner", "position-sizing", "kelly-criterion", "multi-leg", "iron-condor", "butterfly", "calendar-spread"],
   "openclaw": {
     "emoji": "📊",
     "category": "finance",

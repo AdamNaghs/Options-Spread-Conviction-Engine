@@ -1,7 +1,7 @@
 ---
 name: options-spread-conviction-engine
-description: Multi-regime options spread analysis engine. Scores vertical spreads (bull put, bear call, bull call, bear put) and multi-leg strategies (iron condors, butterflies, calendar spreads) using Ichimoku, RSI, MACD, Bollinger Bands, and IV term structure. Outputs 0-100 conviction scores with actionable recommendations.
-version: 2.1.0
+description: Multi-regime options spread analysis engine with Kelly Criterion Position Sizing. Scores vertical spreads (bull put, bear call, bull call, bear put) and multi-leg strategies (iron condors, butterflies, calendar spreads) using Ichimoku, RSI, MACD, Bollinger Bands, IV term structure, and mathematically-optimal Kelly position sizing. Outputs 0-100 conviction scores with actionable recommendations and contract sizing.
+version: 2.2.0
 author: Leonardo Da Pinchy
 metadata:
   openclaw:
@@ -18,6 +18,14 @@ metadata:
 # Options Spread Conviction Engine
 
 **Multi-regime options spread scoring using technical indicators and IV term structure analysis.**
+
+## Install
+
+```bash
+brew install jq
+npm install yahoo-finance2
+sudo ln -s /opt/homebrew/bin/yahoo-finance /usr/local/bin/yf
+```
 
 ## Overview
 
@@ -437,6 +445,7 @@ result = calculate_position(
 
 ## Version History
 
+- **v2.2.0** (2026-02-13): Kelly Criterion position sizing with full/half Kelly, edge calculation, and account-aware contract sizing
 - **v2.1.0** (2026-02-12): Added market scanner, integrated calculator and position sizer
 - **v2.0.0** (2026-02-12): Added multi-leg strategies (iron condor, butterfly, calendar)
 - **v1.2.1** (2026-02-09): Volume multiplier, dynamic strike suggestions

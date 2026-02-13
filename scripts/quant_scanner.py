@@ -117,10 +117,10 @@ class QuantScanner:
             
             # Find vertical spreads
             put_spreads = self.optimizer.optimize_vertical_spreads(
-                chain, spread_type='put_credit', max_width=5.0
+                chain, spread_type='put_credit', max_width=max_width
             )
             call_spreads = self.optimizer.optimize_vertical_spreads(
-                chain, spread_type='call_credit', max_width=5.0
+                chain, spread_type='call_credit', max_width=max_width
             )
             
             # Find iron condors
@@ -244,9 +244,8 @@ class QuantScanner:
             print(f"\n  LEGS:")
             for leg in s.legs:
                 action = "SELL" if leg.action == 'sell' else "BUY"
-                price_type = "bid" if leg.action == 'sell' else "ask"
                 print(f"    {action:4} {leg.option_type.upper():4} @ ${leg.strike:7.2f} "
-                      f"| Premium: ${leg.premium:.2f} ({price_type}) | DTE: {leg.dte}")
+                      f"| Premium: ${leg.premium:.2f} (mid) | DTE: {leg.dte}")
             
             print(f"\n  P&L PROFILE:")
             print(f"    Max Profit:     ${s.max_profit:7.2f}")

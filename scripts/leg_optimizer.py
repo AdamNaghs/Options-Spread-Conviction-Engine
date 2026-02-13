@@ -181,6 +181,11 @@ class LegOptimizer:
         self.analyzer = ChainAnalyzer()
         self.account_total = account_total
     
+    # Minimum IV floor — pre-market/post-market data often reports near-zero IV
+    # which produces 100% POP and meaningless greeks.  15% is a conservative
+    # floor (VIX rarely stays below 12 for extended periods).
+    IV_FLOOR = 0.15
+
     def calculate_strategy_metrics(self, strategy: MultiLegStrategy,
                                    iv: float = 0.25) -> MultiLegStrategy:
         """
@@ -188,6 +193,10 @@ class LegOptimizer:
         """
         if not strategy.legs:
             return strategy
+
+        # Enforce IV floor for realistic probability/greeks calculations
+        # (pre-market/post-market data often reports near-zero IV)
+        iv = max(iv, self.IV_FLOOR)
         
         # Calculate net premium (per share)
         net_premium = sum(leg.net_premium for leg in strategy.legs)
@@ -244,7 +253,6 @@ class LegOptimizer:
             
             strategy.max_profit = (width + net_premium) * 100  # net_premium is negative for debit
             strategy.max_loss = -net_premium * 100
-            # Breakeven varies by type
             
         else:
             # Default: sum of premiums
@@ -272,17 +280,46 @@ class LegOptimizer:
                 net_premium, 'call_credit'
             )
         elif strategy.strategy_type == 'iron_condor':
-            # Approximate as product of both sides being profitable
-            put_pop = self.calc.pop_vertical_spread(
-                S, put_short.strike, put_long.strike, T, iv,
-                0, 'put_credit'  # Simplified
-            )
-            call_pop = self.calc.pop_vertical_spread(
-                S, call_short.strike, call_long.strike, T, iv,
-                0, 'call_credit'
-            )
-            strategy.pop = (put_pop + call_pop) / 2  # Simplified
-        
+            # Get breakevens for Monte Carlo simulation
+            lower_breakeven = strategy.breakevens[0] if strategy.breakevens else (put_short.strike - net_premium)
+            upper_breakeven = strategy.breakevens[1] if len(strategy.breakevens) > 1 else (call_short.strike + net_premium)
+
+            # Use Monte Carlo simulation for more accurate POP calculation
+            # Monte Carlo simulates price paths and checks if price stays within
+            # bounds at ANY point ("touch" probability), which matches how
+            # brokers like Tastytrade calculate POP for Iron Condors.
+            # Black-Scholes only calculates probability AT expiration.
+            try:
+                mc_pop = self.calc.monte_carlo_pop_iron_condor(
+                    S, lower_breakeven, upper_breakeven, T, iv,
+                    n_sims=100000, steps_per_day=2
+                )
+                strategy.pop = mc_pop
+            except Exception as e:
+                logger.debug(f"Monte Carlo POP failed, falling back to Black-Scholes: {e}")
+                # Fallback to Black-Scholes closed-form solution
+                # Correct POP for Iron Condor: P(Lower BE < S_T < Upper BE)
+                # This is P(S_T < Upper BE) - P(S_T < Lower BE)
+                # pop_vertical_spread(call_credit) returns P(S_T < Upper BE)
+                # pop_vertical_spread(put_credit) returns P(S_T > Lower BE)
+                put_pop = self.calc.pop_vertical_spread(
+                    S, put_short.strike, put_long.strike, T, iv,
+                    net_premium, 'put_credit'
+                )
+                call_pop = self.calc.pop_vertical_spread(
+                    S, call_short.strike, call_long.strike, T, iv,
+                    net_premium, 'call_credit'
+                )
+                # P(S_T < Lower BE) = 1 - put_pop
+                # So POP = call_pop - (1 - put_pop) = call_pop + put_pop - 1
+                strategy.pop = max(0, put_pop + call_pop - 1)
+        elif strategy.strategy_type == 'put_debit_spread':
+             strategy.pop = self.calc.pop_vertical_spread(S, long_leg.strike, short_leg.strike, T, iv, net_premium, 'put_debit')
+        elif strategy.strategy_type == 'call_debit_spread':
+             strategy.pop = self.calc.pop_vertical_spread(S, long_leg.strike, short_leg.strike, T, iv, net_premium, 'call_debit')
+        else:
+            strategy.pop = 0.5
+            
         # Expected Value (guard: POP must be in [0,1])
         pop_clamped = max(0.0, min(1.0, strategy.pop))
         strategy.pop = pop_clamped
@@ -354,10 +391,11 @@ class LegOptimizer:
         T = chain.dte / 365.0
         r = 0.045
         
-        # Get widths to try (1, 2, 3, 5)
+        # Get widths to try
         # $1-wide spreads are critical for high-priced underlyings (SPY, QQQ)
         # where OTM credit spreads need narrow widths to fit small accounts
-        widths = [w for w in [1, 2, 3, 5] if w <= max_width]
+        # Wider spreads (7, 10, 15, 20) useful for larger accounts seeking better credit
+        widths = [w for w in [1, 2, 3, 5, 7, 10, 15, 20] if w <= max_width]
         
         for width in widths:
             # Try different short strikes
@@ -374,16 +412,16 @@ class LegOptimizer:
                     if short_opt['strike'] < S * 0.98:
                         continue
                 
-                # Liquidity filter: require valid bid/ask
-                if not short_opt.get('has_valid_bid_ask'):
-                    logger.debug("Skipping short strike %.0f: no valid bid/ask", short_opt['strike'])
-                    continue
-                if short_opt['bid'] <= 0:
-                    logger.debug("Skipping short strike %.0f: bid=0", short_opt['strike'])
+                # Liquidity filter: require valid bid/ask OR lastPrice fallback
+                # Pre-market / post-market: bid/ask are often 0 but lastPrice exists
+                has_bid_ask = short_opt.get('has_valid_bid_ask', False)
+                if not has_bid_ask and short_opt['mid_price'] <= 0:
+                    logger.debug("Skipping short strike %.0f: no bid/ask and no lastPrice", short_opt['strike'])
                     continue
                 if short_opt['mid_price'] <= 0.05:
                     continue
-                if short_opt['spread_pct'] > 0.20:
+                # Only apply spread width filter when we have real bid/ask data
+                if has_bid_ask and short_opt['spread_pct'] > 0.20:
                     logger.debug("Skipping short strike %.0f: wide spread %.1f%%",
                                  short_opt['strike'], short_opt['spread_pct'] * 100)
                     continue
@@ -420,28 +458,28 @@ class LegOptimizer:
                 # Use ATM IV as estimate
                 atm_idx = min(range(len(options)), 
                              key=lambda k: abs(options[k]['strike'] - S))
-                iv = options[atm_idx]['implied_vol']
+                iv = max(options[atm_idx]['implied_vol'] or 0.20, 0.15)
                 
                 # Calculate Greeks for both legs
                 short_greeks = self.bs.calculate_greeks(
                     S, short_opt['strike'], T, r, 
-                    short_opt['implied_vol'] or iv, opt_type
+                    max(short_opt['implied_vol'] or iv, 0.15), opt_type
                 )
                 long_greeks = self.bs.calculate_greeks(
                     S, long_opt['strike'], T, r,
-                    long_opt['implied_vol'] or iv, opt_type
+                    max(long_opt['implied_vol'] or iv, 0.15), opt_type
                 )
                 
-                # Use conservative fill prices for credit spreads:
-                # Short leg: BID (what you'll actually receive)
-                # Long leg: ASK (what you'll actually pay)
-                # This gives worst-case net credit, matching real execution
-                short_premium = short_opt['bid'] if short_opt.get('has_valid_bid_ask') else short_opt['mid_price']
-                long_premium = long_opt['ask'] if long_opt.get('has_valid_bid_ask') else long_opt['mid_price']
+                # Use mid-point pricing for realistic fill estimates:
+                # Most limit orders fill near the mid-point, not at bid/ask extremes.
+                # Conservative bid/ask pricing understates credit spreads and
+                # overstates debit spreads, skewing EV and POP comparisons.
+                short_premium = short_opt['mid_price']
+                long_premium = long_opt['mid_price']
 
-                # Skip if short bid is 0 or long ask is 0 (no real market)
+                # Skip if mid-point is 0 (no real market)
                 if short_premium <= 0 or long_premium <= 0:
-                    logger.debug("Skipping %s/%s: short_bid=%.2f, long_ask=%.2f (no market)",
+                    logger.debug("Skipping %s/%s: short_mid=%.2f, long_mid=%.2f (no market)",
                                  short_opt['strike'], long_opt['strike'], short_premium, long_premium)
                     continue
 
@@ -519,8 +557,10 @@ class LegOptimizer:
                 if strategy.max_loss <= 0:
                     continue
                 
-                # Only include if it fits account or has reasonable metrics
-                if strategy.max_loss <= MAX_RISK_PER_TRADE * 1.5:  # Slightly over for flexibility
+                # Only include if it fits account (use 50% of account as max risk ceiling)
+                # This allows larger spreads for larger accounts while keeping risk managed
+                account_max_risk = self.account_total * 0.50
+                if strategy.max_loss <= account_max_risk:
                     strategies.append(strategy)
         
         return strategies
@@ -572,16 +612,19 @@ class LegOptimizer:
         if not all([put_short, put_long, call_short, call_long]):
             return strategies
         
-        # Get IV
-        atm_idx = min(range(len(chain.puts)), 
-                     key=lambda i: abs(chain.puts[i]['strike'] - S))
-        iv = chain.puts[atm_idx]['implied_vol']
+        # Get IV from the short strikes (higher due to skew/vol smile)
+        put_short_iv = next((p['implied_vol'] for p in chain.puts if abs(p['strike'] - put_short['strike']) < 0.01), None)
+        call_short_iv = next((c['implied_vol'] for c in chain.calls if abs(c['strike'] - call_short['strike']) < 0.01), None)
         
-        # Use conservative fill prices: BID for shorts, ASK for longs
-        ps_prem = put_short['bid'] if put_short.get('has_valid_bid_ask') else put_short['mid_price']
-        pl_prem = put_long['ask'] if put_long.get('has_valid_bid_ask') else put_long['mid_price']
-        cs_prem = call_short['bid'] if call_short.get('has_valid_bid_ask') else call_short['mid_price']
-        cl_prem = call_long['ask'] if call_long.get('has_valid_bid_ask') else call_long['mid_price']
+        # Use the maximum of the two short strike IVs to be conservative
+        # (OTM puts typically have much higher IV than ATM due to skew)
+        iv = max(put_short_iv or 0.20, call_short_iv or 0.20, self.IV_FLOOR)
+        
+        # Use mid-point pricing for realistic fill estimates
+        ps_prem = put_short['mid_price']
+        pl_prem = put_long['mid_price']
+        cs_prem = call_short['mid_price']
+        cl_prem = call_long['mid_price']
 
         # Calculate Greeks
         legs = [
@@ -610,69 +653,5 @@ class LegOptimizer:
         
         if strategy.max_loss <= MAX_RISK_PER_TRADE * 1.5:
             strategies.append(strategy)
-        
-        return strategies
-    
-    def score_strategies(self, strategies: List[MultiLegStrategy],
-                        mode: str = 'pop') -> List[MultiLegStrategy]:
-        """
-        Score and rank strategies based on optimization mode
-        
-        mode: 'pop', 'ev', 'income', 'earnings'
-        """
-        if not strategies:
-            return []
-        
-        # Validate all strategies — reject infinite/undefined risk
-        valid_strategies = []
-        for s in strategies:
-            is_valid, reason = validate_strategy_risk(s)
-            if is_valid:
-                valid_strategies.append(s)
-            else:
-                logger.info("Rejected %s on %s: %s", s.strategy_type, s.ticker, reason)
-        strategies = valid_strategies
-        
-        if not strategies:
-            return []
-        
-        # Filter to only account-fitting strategies if available
-        fitting = [s for s in strategies if s.fits_account]
-        if fitting:
-            strategies = fitting
-        
-        for s in strategies:
-            if mode == 'pop':
-                # Maximize POP
-                s.pop_score = s.pop * 100
-                s.ev_score = s.expected_value / max(abs(s.max_loss), 1)
-                s.income_score = s.total_greeks.theta * 100 if s.total_greeks else 0
-                
-            elif mode == 'ev':
-                # Maximize Expected Value
-                s.pop_score = s.pop * 50  # Still care about POP
-                s.ev_score = s.expected_value / max(abs(s.max_loss), 1) * 100
-                s.income_score = s.total_greeks.theta * 50 if s.total_greeks else 0
-                
-            elif mode == 'income':
-                # Maximize theta with delta neutrality
-                s.pop_score = s.pop * 30
-                s.ev_score = s.expected_value / max(abs(s.max_loss), 1) * 30
-                theta = s.total_greeks.theta if s.total_greeks else 0
-                delta = abs(s.total_greeks.delta) if s.total_greeks else 1
-                s.income_score = theta * 100 * (1 - delta)  # Prefer low delta, high theta
-                
-            elif mode == 'earnings':
-                # For earnings, we want high IV rank and vol crush potential
-                s.pop_score = s.pop * 40
-                s.ev_score = s.expected_value / max(abs(s.max_loss), 1) * 60
-                s.income_score = s.total_greeks.vega * -10 if s.total_greeks else 0  # Short vega
-        
-        # Calculate composite score
-        for s in strategies:
-            s.composite_score = s.pop_score * 0.4 + s.ev_score * 0.4 + s.income_score * 0.2
-        
-        # Sort by composite score
-        strategies.sort(key=lambda x: x.composite_score, reverse=True)
         
         return strategies

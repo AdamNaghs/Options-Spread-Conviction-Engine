@@ -4,15 +4,13 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-green.svg)](https://clawhub.com)
 
-**Multi-regime vertical spread analysis engine with Volume Multiplier and Dynamic Strike Suggestions.**
+**Multi-regime options spread analysis engine with Kelly Criterion Position Sizing, Multi-Leg Strategies, and Quantitative Scanning.**
 
-A comprehensive scoring system for options traders that analyzes market conditions and provides actionable conviction scores (0-100) for four vertical spread strategies.
+A comprehensive scoring system for options traders that analyzes market conditions and provides actionable conviction scores (0-100) for seven strategies including vertical spreads, iron condors, butterflies, and calendar spreads. Features mathematically-rigorous Kelly criterion position sizing integrated directly into the conviction engine.
 
 ## 🎯 What It Does
 
-Analyzes any stock ticker and scores four vertical spread strategies. **v1.1.0** adds:
-- **Volume Multiplier**: Rewards breakouts with high volume and penalizes low-volume fakeouts.
-- **Dynamic Strike Suggestions**: Automatically calculates recommended short/long strikes based on 1-sigma Bollinger Band levels.
+Analyzes any stock ticker and scores **seven** options strategies across directional and non-directional setups:
 
 | Strategy | Type | Philosophy | Ideal Setup |
 |----------|------|------------|-------------|
@@ -20,26 +18,72 @@ Analyzes any stock ticker and scores four vertical spread strategies. **v1.1.0**
 | **bear_call** | Credit | Mean Reversion | Bearish trend + overbought rip |
 | **bull_call** | Debit | Breakout | Strong bullish momentum |
 | **bear_put** | Debit | Breakout | Strong bearish momentum |
+| **iron_condor** | Credit | Premium Selling | IV Rank >70, range-bound |
+| **butterfly** | Debit | Pinning Play | Vol compression, low trend |
+| **calendar** | Debit | Theta Harvest | Inverted IV term structure |
+
+### Key Features
+
+- **Kelly Criterion Position Sizing**: Mathematically optimal position sizing based on edge, win probability, and account constraints. Half-Kelly default for options volatility, with 25% bankroll cap and full edge case handling.
+- **Multi-Leg Strategy Support**: Iron condors, butterflies, and calendar spreads with IV term structure analysis.
+- **Quantitative Scanners**: Monte Carlo POP simulation and expected value optimization.
+- **Volume Multiplier**: Rewards breakouts with high volume, penalizes low-volume fakeouts.
+- **Dynamic Strike Suggestions**: Auto-calculates recommended strikes based on 1-sigma/2-sigma Bollinger levels.
 
 ## 📊 Scoring Methodology
 
-### Credit Spreads (bull_put, bear_call)
+### Vertical Spreads (Credit/Debit)
+
+Weights vary by strategy type:
+
+#### Credit Spreads (bull_put, bear_call)
 | Indicator | Weight | Purpose |
 |-----------|--------|---------|
-| Ichimoku Cloud | 30 pts | Trend structure & equilibrium |
-| RSI | 25 pts | Entry timing (mean-reversion) |
-| MACD | 20 pts | Momentum confirmation |
+| Ichimoku Cloud | 25 pts | Trend structure & equilibrium |
+| RSI | 20 pts | Entry timing (mean-reversion) |
+| MACD | 15 pts | Momentum confirmation |
 | Bollinger Bands | 25 pts | Volatility regime |
+| ADX | 15 pts | Trend strength validation |
 
-### Debit Spreads (bull_call, bear_put)
+#### Debit Spreads (bull_call, bear_put)
 | Indicator | Weight | Purpose |
 |-----------|--------|---------|
-| Ichimoku Cloud | 25 pts | Trend confirmation |
-| RSI | 15 pts | Directional momentum |
-| MACD | 35 pts | Breakout acceleration |
+| Ichimoku Cloud | 20 pts | Trend confirmation |
+| RSI | 10 pts | Directional momentum |
+| MACD | 30 pts | Breakout acceleration |
 | Bollinger Bands | 25 pts | Bandwidth expansion |
+| ADX | 15 pts | Trend strength validation |
 
-**Total: 100 points**
+### Multi-Leg Strategies
+
+#### Iron Condor (Range-Bound)
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| IV Rank | 25 pts | Rich premiums to sell |
+| RSI Neutrality | 20 pts | No directional momentum |
+| ADX Range-Bound | 20 pts | Weak trend = range structure |
+| Price Position | 20 pts | Centered in range |
+| MACD Neutrality | 15 pts | No acceleration |
+
+#### Butterfly (Volatility Compression)
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| BB Squeeze | 30 pts | Vol compression signal |
+| RSI Neutrality | 25 pts | Price at equilibrium |
+| ADX Weakness | 20 pts | No trend |
+| Price Centering | 15 pts | At middle strike |
+| MACD Flatness | 10 pts | No momentum |
+
+#### Calendar Spread (Theta Harvest)
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| IV Term Structure | 30 pts | Front IV > Back IV |
+| Price Stability | 20 pts | Near strike stability |
+| RSI Neutrality | 20 pts | No directional drift |
+| ADX Moderate | 15 pts | Some structure |
+| MACD Neutrality | 15 pts | No acceleration |
+
+**Total: 100 points for all strategies**
 
 ## 🎚️ Conviction Tiers
 
@@ -49,6 +93,49 @@ Analyzes any stock ticker and scores four vertical spread strategies. **v1.1.0**
 | 60-79 | **PREPARE** | Favorable — Size the trade |
 | 40-59 | **WATCH** | Interesting — Add to watchlist |
 | 0-39 | **WAIT** | Poor conditions — Avoid / No setup |
+
+## 💰 Kelly Criterion Position Sizing
+
+Integrated mathematically-optimal position sizing using the Kelly criterion, adapted for options trading volatility.
+
+### Formula
+```
+f* = (p·b − q) / b
+```
+Where:
+- `f*` = optimal fraction of bankroll to risk
+- `p` = probability of win (POP)
+- `q` = probability of loss (1 − p)
+- `b` = win/loss ratio (average win / average loss)
+
+### Safety Adjustments for Options
+- **Half-Kelly default**: 0.5× multiplier for options volatility uncertainty
+- **25% bankroll cap**: Hard limit to prevent ruin from model error
+- **Per-trade limits**: Respects `MAX_RISK_PER_TRADE` constraints
+- **Cash buffer**: Maintains minimum cash reserves
+
+### Usage
+```python
+from options_math import kelly_position_size, KellyResult
+
+result = kelly_position_size(
+    account_balance=1000.0,
+    pop=0.65,           # 65% probability of profit
+    max_profit=40.0,    # $40 credit received
+    max_loss=100.0,     # $100 risk per spread
+    kelly_multiplier=0.5,  # Half-Kelly for safety
+)
+
+print(f"Contracts: {result.recommended_contracts}")
+print(f"Risk: ${result.recommended_risk:.2f}")
+print(f"Kelly fraction: {result.adjusted_kelly_fraction:.2%}")
+```
+
+### Edge Case Handling
+- **Negative edge** → 0 contracts (trade rejected)
+- **Zero edge** → 0 contracts (no mathematical advantage)
+- **High edge** → Capped at 25% of bankroll
+- **Insufficient funds** → 0 contracts with explanation
 
 ## 🚀 Installation
 
@@ -60,15 +147,15 @@ conviction-engine AAPL --strategy bull_call
 
 ### Manual Installation
 ```bash
-git clone https://github.com/YOUR_USERNAME/options-spread-conviction-engine.git
-cd options-spread-conviction-engine
+git clone https://github.com/AdamNaghs/Options-Spread-Conviction-Engine.git
+cd Options-Spread-Conviction-Engine
 bash scripts/setup-venv.sh
 ./scripts/conviction-engine AAPL
 ```
 
 ## 📖 Usage
 
-### Basic Analysis
+### Vertical Spreads
 ```bash
 # Analyze AAPL with default strategy (bull_put)
 conviction-engine AAPL
@@ -78,21 +165,36 @@ conviction-engine SPY --strategy bear_call
 conviction-engine QQQ --strategy bull_call --period 2y
 ```
 
+### Multi-Leg Strategies
+```bash
+# Iron Condor — high IV, range-bound
+conviction-engine SPY --strategy iron_condor
+
+# Butterfly — volatility compression, pinning play
+conviction-engine AAPL --strategy butterfly
+
+# Calendar — inverted IV term structure, theta harvest
+conviction-engine TSLA --strategy calendar
+```
+
 ### Multiple Tickers
 ```bash
 conviction-engine AAPL MSFT GOOGL --strategy bull_put
+conviction-engine SPY QQQ IWM --strategy iron_condor
 ```
 
 ### JSON Output (for automation)
 ```bash
 conviction-engine TSLA --strategy bear_call --json
+conviction-engine SPY --strategy calendar --json | jq '.[0].iv_term_structure'
 ```
 
 ### Full Options
 ```bash
 conviction-engine <ticker> [ticker...]
-  --strategy {bull_put,bear_call,bull_call,bear_put}
+  --strategy {bull_put,bear_call,bull_call,bear_put,iron_condor,butterfly,calendar}
   --period {1y,2y,3y,5y}
+  --interval {1h,1d,1wk}
   --json
   --verbose
 ```
@@ -162,12 +264,16 @@ skills/options-spread-conviction-engine/
 ├── README.md                   # This file
 ├── _meta.json                  # Skill metadata
 ├── scripts/
-│   ├── conviction-engine       # Main wrapper script
+│   ├── conviction-engine       # Main CLI wrapper
 │   ├── setup-venv.sh          # Environment setup
-│   ├── spread_conviction_engine.py  # Core engine (~1400 lines)
-│   ├── quant_scanner.py        # Quantitative options scanner
+│   ├── spread_conviction_engine.py  # Core engine (vertical spreads)
+│   ├── multi_leg_strategies.py     # Iron condor, butterfly, calendar
+│   ├── quant_scanner.py        # Quantitative options scanner (Monte Carlo POP)
+│   ├── market_scanner.py       # Technical scanner for EXECUTE plays
 │   ├── chain_analyzer.py       # IV surface & skew analysis
-│   ├── options_math.py         # Black-Scholes & Monte Carlo
+│   ├── calculator.py           # Black-Scholes pricing & Greeks
+│   ├── position_sizer.py       # Kelly criterion position sizing
+│   ├── options_math.py         # Core math: Black-Scholes, Monte Carlo, Kelly
 │   └── numba.py               # Python 3.14+ compatibility shim
 └── assets/                     # Additional resources
 ```
@@ -210,10 +316,19 @@ MIT — Part of the Financial Toolkit for OpenClaw
 ## 🤝 Contributing
 
 Contributions welcome! Areas for improvement:
-- Additional strategies (iron condors, calendars)
-- More indicators (ATR, VWAP, Volume Profile)
-- Backtesting module
+- Backtesting module with historical trade simulation
 - Webhook alerts for high-conviction setups
+- Additional indicators (ATR, VWAP, Volume Profile)
+- Execution API integration (TD Ameritrade, Interactive Brokers)
+
+## 🔄 Version History
+
+- **v2.2.0** (2026-02-13): Kelly Criterion position sizing integrated into options_math.py with full/half Kelly, edge calculation, and position sizing constraints
+- **v2.1.0** (2026-02-12): Added market scanner, integrated calculator and position sizer
+- **v2.0.0** (2026-02-12): Multi-leg strategies (iron condor, butterfly, calendar) with IV term structure analysis
+- **v1.2.1** (2026-02-09): Volume multiplier, dynamic strike suggestions
+- **v1.1.0** (2026-02-08): Cross-signal weighting, multi-strategy support
+- **v1.0.0** (2026-02-07): Initial bull put spread engine
 
 ## ⚠️ Disclaimer
 
