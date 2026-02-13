@@ -3,8 +3,12 @@ Multi-Leg Strategy Optimizer
 
 Finds optimal combinations of options legs for various strategies:
 - Vertical spreads (credit/debit)
-- Iron condors
-- Butterflies
+- Iron condors / inverse iron condors
+- Iron butterflies / inverse iron butterflies
+- Straddles (long/short)
+- Strangles (long/short)
+- Single-leg (long call, long put)
+- Ratio backspreads (call/put)
 - Calendars
 
 Optimizes for: max POP, max EV, min risk, delta neutrality
@@ -131,18 +135,21 @@ def validate_strategy_risk(strategy: MultiLegStrategy) -> Tuple[bool, str]:
     short_put_qty = sum(l.quantity for l in short_puts)
     long_put_qty = sum(l.quantity for l in long_puts)
 
-    # Naked short calls = infinite risk
-    if short_call_qty > 0 and long_call_qty == 0:
-        return False, "naked short call(s) — infinite risk"
-    # Naked short puts = undefined risk (strike * 100)
-    if short_put_qty > 0 and long_put_qty == 0:
-        return False, "naked short put(s) — undefined risk"
+    # Allow known unlimited-risk strategies to pass through
+    known_unlimited = {'short_straddle', 'short_strangle', 'call_ratio_backspread', 'put_ratio_backspread'}
+    if strategy.strategy_type not in known_unlimited:
+        # Naked short calls = infinite risk
+        if short_call_qty > 0 and long_call_qty == 0:
+            return False, "naked short call(s) — infinite risk"
+        # Naked short puts = undefined risk (strike * 100)
+        if short_put_qty > 0 and long_put_qty == 0:
+            return False, "naked short put(s) — undefined risk"
 
-    # --- Ratio spreads (more shorts than longs) ---
-    if short_call_qty > long_call_qty:
-        return False, f"ratio call spread ({short_call_qty}:{long_call_qty} short:long) — undefined risk"
-    if short_put_qty > long_put_qty:
-        return False, f"ratio put spread ({short_put_qty}:{long_put_qty} short:long) — undefined risk"
+        # --- Ratio spreads (more shorts than longs) ---
+        if short_call_qty > long_call_qty:
+            return False, f"ratio call spread ({short_call_qty}:{long_call_qty} short:long) — undefined risk"
+        if short_put_qty > long_put_qty:
+            return False, f"ratio put spread ({short_put_qty}:{long_put_qty} short:long) — undefined risk"
 
     # --- P&L validation ---
     if strategy.max_profit < 0:
@@ -253,7 +260,135 @@ class LegOptimizer:
             
             strategy.max_profit = (width + net_premium) * 100  # net_premium is negative for debit
             strategy.max_loss = -net_premium * 100
+
+        elif strategy.strategy_type == 'inverse_iron_butterfly':
+            # Long ATM straddle + short OTM strangle
+            # net_premium is negative (net debit)
+            long_call = [l for l in strategy.legs if l.action == 'buy' and l.option_type == 'call'][0]
+            short_call = [l for l in strategy.legs if l.action == 'sell' and l.option_type == 'call'][0]
+            long_put = [l for l in strategy.legs if l.action == 'buy' and l.option_type == 'put'][0]
+            short_put = [l for l in strategy.legs if l.action == 'sell' and l.option_type == 'put'][0]
             
+            wing_width = short_call.strike - long_call.strike  # distance ATM to OTM wing
+            net_debit = -net_premium  # positive number
+            strategy.max_profit = (wing_width - net_debit) * 100
+            strategy.max_loss = net_debit * 100
+            strategy.breakevens = [long_call.strike - net_debit, long_call.strike + net_debit]
+
+        elif strategy.strategy_type == 'iron_butterfly':
+            # Short ATM straddle + long OTM strangle
+            short_call = [l for l in strategy.legs if l.action == 'sell' and l.option_type == 'call'][0]
+            long_call = [l for l in strategy.legs if l.action == 'buy' and l.option_type == 'call'][0]
+            short_put = [l for l in strategy.legs if l.action == 'sell' and l.option_type == 'put'][0]
+            long_put = [l for l in strategy.legs if l.action == 'buy' and l.option_type == 'put'][0]
+            
+            wing_width = long_call.strike - short_call.strike
+            strategy.max_profit = net_premium * 100  # net credit
+            strategy.max_loss = (wing_width - net_premium) * 100
+            strategy.breakevens = [short_call.strike - net_premium, short_call.strike + net_premium]
+
+        elif strategy.strategy_type == 'inverse_iron_condor':
+            # Long closer strangle + short wider strangle (net debit)
+            long_call = [l for l in strategy.legs if l.action == 'buy' and l.option_type == 'call'][0]
+            short_call = [l for l in strategy.legs if l.action == 'sell' and l.option_type == 'call'][0]
+            long_put = [l for l in strategy.legs if l.action == 'buy' and l.option_type == 'put'][0]
+            short_put = [l for l in strategy.legs if l.action == 'sell' and l.option_type == 'put'][0]
+            
+            call_width = short_call.strike - long_call.strike
+            put_width = long_put.strike - short_put.strike
+            max_wing = max(call_width, put_width)
+            net_debit = -net_premium
+            strategy.max_profit = (max_wing - net_debit) * 100
+            strategy.max_loss = net_debit * 100
+            strategy.breakevens = [long_put.strike - net_debit, long_call.strike + net_debit]
+
+        elif strategy.strategy_type == 'long_straddle':
+            # BUY ATM call + BUY ATM put
+            call_leg = [l for l in strategy.legs if l.option_type == 'call'][0]
+            put_leg = [l for l in strategy.legs if l.option_type == 'put'][0]
+            total_debit = call_leg.premium + put_leg.premium
+            strategy.max_profit = 99999 * 100  # Effectively unlimited
+            strategy.max_loss = total_debit * 100
+            strategy.breakevens = [call_leg.strike - total_debit, call_leg.strike + total_debit]
+
+        elif strategy.strategy_type == 'long_strangle':
+            # BUY OTM call + BUY OTM put
+            call_leg = [l for l in strategy.legs if l.option_type == 'call'][0]
+            put_leg = [l for l in strategy.legs if l.option_type == 'put'][0]
+            total_debit = call_leg.premium + put_leg.premium
+            strategy.max_profit = 99999 * 100
+            strategy.max_loss = total_debit * 100
+            strategy.breakevens = [put_leg.strike - total_debit, call_leg.strike + total_debit]
+
+        elif strategy.strategy_type == 'short_straddle':
+            # SELL ATM call + SELL ATM put
+            call_leg = [l for l in strategy.legs if l.option_type == 'call'][0]
+            put_leg = [l for l in strategy.legs if l.option_type == 'put'][0]
+            total_credit = call_leg.premium + put_leg.premium
+            strategy.max_profit = total_credit * 100
+            strategy.max_loss = 99999 * 100  # Unlimited
+            strategy.breakevens = [call_leg.strike - total_credit, call_leg.strike + total_credit]
+
+        elif strategy.strategy_type == 'short_strangle':
+            # SELL OTM call + SELL OTM put
+            call_leg = [l for l in strategy.legs if l.option_type == 'call'][0]
+            put_leg = [l for l in strategy.legs if l.option_type == 'put'][0]
+            total_credit = call_leg.premium + put_leg.premium
+            strategy.max_profit = total_credit * 100
+            strategy.max_loss = 99999 * 100  # Unlimited
+            strategy.breakevens = [put_leg.strike - total_credit, call_leg.strike + total_credit]
+
+        elif strategy.strategy_type == 'long_call':
+            leg = strategy.legs[0]
+            strategy.max_profit = 99999 * 100  # Unlimited
+            strategy.max_loss = leg.premium * 100
+            strategy.breakevens = [leg.strike + leg.premium]
+
+        elif strategy.strategy_type == 'long_put':
+            leg = strategy.legs[0]
+            strategy.max_profit = max(0, (leg.strike - leg.premium) * 100)
+            strategy.max_loss = leg.premium * 100
+            strategy.breakevens = [leg.strike - leg.premium]
+
+        elif strategy.strategy_type == 'call_ratio_backspread':
+            # SELL 1 lower call, BUY 2 higher calls
+            short_leg = [l for l in strategy.legs if l.action == 'sell'][0]
+            long_legs = [l for l in strategy.legs if l.action == 'buy']
+            long_leg = long_legs[0]
+            
+            strike_diff = long_leg.strike - short_leg.strike
+            # net_premium: positive = credit, negative = debit
+            strategy.max_profit = 99999 * 100  # Unlimited above upper BE
+            strategy.max_loss = (strike_diff - net_premium) * 100 if net_premium >= 0 else (strike_diff + abs(net_premium)) * 100
+            # Max loss occurs at long strike at expiration
+            if net_premium >= 0:
+                # Entered for credit: lower BE exists
+                lower_be = short_leg.strike + net_premium
+                upper_be = long_leg.strike + strike_diff - net_premium
+            else:
+                upper_be = long_leg.strike + strike_diff + abs(net_premium)
+                lower_be = short_leg.strike + net_premium  # below short strike
+            strategy.breakevens = [lower_be, upper_be]
+
+        elif strategy.strategy_type == 'put_ratio_backspread':
+            # SELL 1 higher put, BUY 2 lower puts
+            short_leg = [l for l in strategy.legs if l.action == 'sell'][0]
+            long_legs = [l for l in strategy.legs if l.action == 'buy']
+            long_leg = long_legs[0]
+            
+            strike_diff = short_leg.strike - long_leg.strike
+            # At stock=0: gain from 2 long puts = 2*long_strike, loss from short put = short_strike
+            max_profit_at_zero = 2 * long_leg.strike - short_leg.strike
+            strategy.max_profit = max(0, (max_profit_at_zero + net_premium) * 100)
+            strategy.max_loss = (strike_diff - net_premium) * 100 if net_premium >= 0 else (strike_diff + abs(net_premium)) * 100
+            if net_premium >= 0:
+                upper_be = short_leg.strike - net_premium
+                lower_be = long_leg.strike - (strike_diff - net_premium)
+            else:
+                upper_be = short_leg.strike - net_premium
+                lower_be = long_leg.strike - strike_diff - abs(net_premium)
+            strategy.breakevens = [max(0, lower_be), upper_be]
+
         else:
             # Default: sum of premiums
             strategy.max_profit = abs(net_premium) * 100
@@ -317,6 +452,61 @@ class LegOptimizer:
              strategy.pop = self.calc.pop_vertical_spread(S, long_leg.strike, short_leg.strike, T, iv, net_premium, 'put_debit')
         elif strategy.strategy_type == 'call_debit_spread':
              strategy.pop = self.calc.pop_vertical_spread(S, long_leg.strike, short_leg.strike, T, iv, net_premium, 'call_debit')
+        elif strategy.strategy_type in ('inverse_iron_butterfly', 'inverse_iron_condor',
+                                         'long_straddle', 'long_strangle'):
+            # Profit if price moves beyond breakevens (either direction)
+            if len(strategy.breakevens) == 2:
+                lower_be, upper_be = strategy.breakevens
+                # P(profit) = P(S < lower_be) + P(S > upper_be) = 1 - P(lower_be < S < upper_be)
+                from scipy.stats import norm
+                d_lower = (np.log(S / lower_be) + (0.045 - 0.5 * iv**2) * T) / (iv * np.sqrt(T))
+                d_upper = (np.log(S / upper_be) + (0.045 - 0.5 * iv**2) * T) / (iv * np.sqrt(T))
+                prob_between = norm.cdf(d_lower) - norm.cdf(d_upper)
+                strategy.pop = max(0.0, 1.0 - prob_between)
+            else:
+                strategy.pop = 0.5
+        elif strategy.strategy_type in ('iron_butterfly', 'short_straddle', 'short_strangle'):
+            # Profit if price stays between breakevens
+            if len(strategy.breakevens) == 2:
+                lower_be, upper_be = strategy.breakevens
+                from scipy.stats import norm
+                d_lower = (np.log(S / lower_be) + (0.045 - 0.5 * iv**2) * T) / (iv * np.sqrt(T))
+                d_upper = (np.log(S / upper_be) + (0.045 - 0.5 * iv**2) * T) / (iv * np.sqrt(T))
+                strategy.pop = max(0.0, norm.cdf(d_lower) - norm.cdf(d_upper))
+            else:
+                strategy.pop = 0.5
+        elif strategy.strategy_type == 'long_call':
+            # P(S > breakeven)
+            be = strategy.breakevens[0]
+            from scipy.stats import norm
+            d = (np.log(S / be) + (0.045 - 0.5 * iv**2) * T) / (iv * np.sqrt(T))
+            strategy.pop = max(0.0, norm.cdf(d))
+        elif strategy.strategy_type == 'long_put':
+            # P(S < breakeven)
+            be = strategy.breakevens[0]
+            from scipy.stats import norm
+            d = (np.log(S / be) + (0.045 - 0.5 * iv**2) * T) / (iv * np.sqrt(T))
+            strategy.pop = max(0.0, 1.0 - norm.cdf(d))
+        elif strategy.strategy_type in ('call_ratio_backspread', 'put_ratio_backspread'):
+            # Approximate: profit beyond breakevens
+            if len(strategy.breakevens) == 2:
+                lower_be, upper_be = sorted(strategy.breakevens)
+                from scipy.stats import norm
+                d_lower = (np.log(S / lower_be) + (0.045 - 0.5 * iv**2) * T) / (iv * np.sqrt(T))
+                d_upper = (np.log(S / upper_be) + (0.045 - 0.5 * iv**2) * T) / (iv * np.sqrt(T))
+                if strategy.strategy_type == 'call_ratio_backspread':
+                    # Profit below lower BE (if credit) + above upper BE
+                    if net_premium >= 0:
+                        strategy.pop = max(0.0, (1 - norm.cdf(d_lower)) + norm.cdf(d_upper))
+                    else:
+                        strategy.pop = max(0.0, norm.cdf(d_upper))  # Only profit above upper BE
+                else:
+                    if net_premium >= 0:
+                        strategy.pop = max(0.0, norm.cdf(d_upper) + (1 - norm.cdf(d_lower)))
+                    else:
+                        strategy.pop = max(0.0, 1 - norm.cdf(d_lower))
+            else:
+                strategy.pop = 0.5
         else:
             strategy.pop = 0.5
             
@@ -724,4 +914,535 @@ class LegOptimizer:
         if strategy.max_loss <= MAX_RISK_PER_TRADE * 1.5:
             strategies.append(strategy)
         
+        return strategies
+
+    # ----------------------------------------------------------------
+    # Helper: find option nearest a target strike with liquidity filters
+    # ----------------------------------------------------------------
+    def _find_option(self, options: list, target_strike: float,
+                     tolerance: float = 1.0, require_liquidity: bool = True):
+        """Return the option dict closest to *target_strike*, or None."""
+        best = None
+        best_diff = float('inf')
+        for opt in options:
+            diff = abs(opt['strike'] - target_strike)
+            if diff < best_diff:
+                best_diff = diff
+                best = opt
+        if best is None or best_diff > tolerance:
+            return None
+        if require_liquidity:
+            bid = best.get('bid', 0) or 0
+            if bid <= 0 or best['mid_price'] <= 0:
+                return None
+        return best
+
+    def _atm_iv(self, chain: OptionChain) -> float:
+        """Return ATM implied vol from the chain (calls preferred)."""
+        S = chain.underlying_price
+        options = chain.calls or chain.puts or []
+        if not options:
+            return 0.25
+        atm = min(options, key=lambda o: abs(o['strike'] - S))
+        return max(atm.get('implied_vol') or 0.25, self.IV_FLOOR)
+
+    # ----------------------------------------------------------------
+    # 1. Inverse Iron Butterfly  (long straddle + short strangle)
+    # ----------------------------------------------------------------
+    def optimize_inverse_iron_butterfly(self, chain: OptionChain,
+                                        body_width: float = 0.5,
+                                        wing_width: float = 5.0) -> List[MultiLegStrategy]:
+        """
+        BUY ATM Call + BUY ATM Put (straddle body)
+        SELL OTM Call + SELL OTM Put (strangle wings)
+
+        body_width: max % distance from ATM for body strikes (0.5 = 0.5%)
+        wing_width: dollar distance from ATM to wing strikes
+        """
+        strategies = []
+        if not chain.calls or not chain.puts:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        # ATM strikes
+        atm_call = self._find_option(chain.calls, S, tolerance=S * body_width / 100 + 1)
+        atm_put = self._find_option(chain.puts, S, tolerance=S * body_width / 100 + 1)
+        if not atm_call or not atm_put:
+            return strategies
+
+        for w in ([wing_width] if isinstance(wing_width, (int, float)) else wing_width):
+            otm_call = self._find_option(chain.calls, S + w)
+            otm_put = self._find_option(chain.puts, S - w)
+            if not otm_call or not otm_put:
+                continue
+
+            legs = [
+                TradeLeg(atm_call['strike'], chain.expiration_date, chain.dte,
+                         atm_call['mid_price'], 'call', 'buy',
+                         greeks=self.bs.calculate_greeks(S, atm_call['strike'], T, r, iv, 'call')),
+                TradeLeg(atm_put['strike'], chain.expiration_date, chain.dte,
+                         atm_put['mid_price'], 'put', 'buy',
+                         greeks=self.bs.calculate_greeks(S, atm_put['strike'], T, r, iv, 'put')),
+                TradeLeg(otm_call['strike'], chain.expiration_date, chain.dte,
+                         otm_call['mid_price'], 'call', 'sell',
+                         greeks=self.bs.calculate_greeks(S, otm_call['strike'], T, r, iv, 'call')),
+                TradeLeg(otm_put['strike'], chain.expiration_date, chain.dte,
+                         otm_put['mid_price'], 'put', 'sell',
+                         greeks=self.bs.calculate_greeks(S, otm_put['strike'], T, r, iv, 'put')),
+            ]
+
+            strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='inverse_iron_butterfly',
+                                     underlying_price=S, legs=legs)
+            strat = self.calculate_strategy_metrics(strat, iv)
+            if strat.max_profit > 0 and strat.max_loss > 0:
+                strategies.append(strat)
+
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 2. Iron Butterfly  (short straddle + long strangle)
+    # ----------------------------------------------------------------
+    def optimize_iron_butterfly(self, chain: OptionChain,
+                                body_width: float = 0.5,
+                                wing_width: float = 5.0) -> List[MultiLegStrategy]:
+        """
+        SELL ATM Call + SELL ATM Put (straddle body)
+        BUY OTM Call + BUY OTM Put (strangle wings)
+        """
+        strategies = []
+        if not chain.calls or not chain.puts:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        atm_call = self._find_option(chain.calls, S, tolerance=S * body_width / 100 + 1)
+        atm_put = self._find_option(chain.puts, S, tolerance=S * body_width / 100 + 1)
+        if not atm_call or not atm_put:
+            return strategies
+
+        for w in ([wing_width] if isinstance(wing_width, (int, float)) else wing_width):
+            otm_call = self._find_option(chain.calls, S + w)
+            otm_put = self._find_option(chain.puts, S - w)
+            if not otm_call or not otm_put:
+                continue
+
+            legs = [
+                TradeLeg(atm_call['strike'], chain.expiration_date, chain.dte,
+                         atm_call['mid_price'], 'call', 'sell',
+                         greeks=self.bs.calculate_greeks(S, atm_call['strike'], T, r, iv, 'call')),
+                TradeLeg(atm_put['strike'], chain.expiration_date, chain.dte,
+                         atm_put['mid_price'], 'put', 'sell',
+                         greeks=self.bs.calculate_greeks(S, atm_put['strike'], T, r, iv, 'put')),
+                TradeLeg(otm_call['strike'], chain.expiration_date, chain.dte,
+                         otm_call['mid_price'], 'call', 'buy',
+                         greeks=self.bs.calculate_greeks(S, otm_call['strike'], T, r, iv, 'call')),
+                TradeLeg(otm_put['strike'], chain.expiration_date, chain.dte,
+                         otm_put['mid_price'], 'put', 'buy',
+                         greeks=self.bs.calculate_greeks(S, otm_put['strike'], T, r, iv, 'put')),
+            ]
+
+            strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='iron_butterfly',
+                                     underlying_price=S, legs=legs)
+            strat = self.calculate_strategy_metrics(strat, iv)
+            if strat.max_profit > 0 and strat.max_loss > 0:
+                strategies.append(strat)
+
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 3. Inverse Iron Condor  (long closer strangle + short wider strangle)
+    # ----------------------------------------------------------------
+    def optimize_inverse_iron_condor(self, chain: OptionChain,
+                                     inner_pct: float = 0.03,
+                                     outer_width: float = 5.0) -> List[MultiLegStrategy]:
+        """
+        BUY OTM Call/Put (closer to ATM)
+        SELL further OTM Call/Put (wider)
+
+        inner_pct: % OTM for long strangle legs (e.g. 0.03 = 3%)
+        outer_width: $ distance from inner to outer strikes
+        """
+        strategies = []
+        if not chain.calls or not chain.puts:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        inner_call_target = S * (1 + inner_pct)
+        inner_put_target = S * (1 - inner_pct)
+
+        inner_call = self._find_option(chain.calls, inner_call_target)
+        inner_put = self._find_option(chain.puts, inner_put_target)
+        if not inner_call or not inner_put:
+            return strategies
+
+        for w in ([outer_width] if isinstance(outer_width, (int, float)) else outer_width):
+            outer_call = self._find_option(chain.calls, inner_call['strike'] + w)
+            outer_put = self._find_option(chain.puts, inner_put['strike'] - w)
+            if not outer_call or not outer_put:
+                continue
+
+            legs = [
+                TradeLeg(inner_call['strike'], chain.expiration_date, chain.dte,
+                         inner_call['mid_price'], 'call', 'buy',
+                         greeks=self.bs.calculate_greeks(S, inner_call['strike'], T, r, iv, 'call')),
+                TradeLeg(inner_put['strike'], chain.expiration_date, chain.dte,
+                         inner_put['mid_price'], 'put', 'buy',
+                         greeks=self.bs.calculate_greeks(S, inner_put['strike'], T, r, iv, 'put')),
+                TradeLeg(outer_call['strike'], chain.expiration_date, chain.dte,
+                         outer_call['mid_price'], 'call', 'sell',
+                         greeks=self.bs.calculate_greeks(S, outer_call['strike'], T, r, iv, 'call')),
+                TradeLeg(outer_put['strike'], chain.expiration_date, chain.dte,
+                         outer_put['mid_price'], 'put', 'sell',
+                         greeks=self.bs.calculate_greeks(S, outer_put['strike'], T, r, iv, 'put')),
+            ]
+
+            strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='inverse_iron_condor',
+                                     underlying_price=S, legs=legs)
+            strat = self.calculate_strategy_metrics(strat, iv)
+            if strat.max_profit > 0 and strat.max_loss > 0:
+                strategies.append(strat)
+
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 4. Long Straddle
+    # ----------------------------------------------------------------
+    def optimize_long_straddle(self, chain: OptionChain) -> List[MultiLegStrategy]:
+        """BUY ATM Call + BUY ATM Put (same strike)."""
+        strategies = []
+        if not chain.calls or not chain.puts:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        atm_call = self._find_option(chain.calls, S)
+        atm_put = self._find_option(chain.puts, S)
+        if not atm_call or not atm_put:
+            return strategies
+
+        legs = [
+            TradeLeg(atm_call['strike'], chain.expiration_date, chain.dte,
+                     atm_call['mid_price'], 'call', 'buy',
+                     greeks=self.bs.calculate_greeks(S, atm_call['strike'], T, r, iv, 'call')),
+            TradeLeg(atm_put['strike'], chain.expiration_date, chain.dte,
+                     atm_put['mid_price'], 'put', 'buy',
+                     greeks=self.bs.calculate_greeks(S, atm_put['strike'], T, r, iv, 'put')),
+        ]
+
+        strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='long_straddle',
+                                 underlying_price=S, legs=legs)
+        strat = self.calculate_strategy_metrics(strat, iv)
+        if strat.max_loss > 0:
+            strategies.append(strat)
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 5. Long Strangle
+    # ----------------------------------------------------------------
+    def optimize_long_strangle(self, chain: OptionChain,
+                               call_otm_pct: float = 0.05,
+                               put_otm_pct: float = 0.05) -> List[MultiLegStrategy]:
+        """BUY OTM Call + BUY OTM Put."""
+        strategies = []
+        if not chain.calls or not chain.puts:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        otm_call = self._find_option(chain.calls, S * (1 + call_otm_pct))
+        otm_put = self._find_option(chain.puts, S * (1 - put_otm_pct))
+        if not otm_call or not otm_put:
+            return strategies
+
+        legs = [
+            TradeLeg(otm_call['strike'], chain.expiration_date, chain.dte,
+                     otm_call['mid_price'], 'call', 'buy',
+                     greeks=self.bs.calculate_greeks(S, otm_call['strike'], T, r, iv, 'call')),
+            TradeLeg(otm_put['strike'], chain.expiration_date, chain.dte,
+                     otm_put['mid_price'], 'put', 'buy',
+                     greeks=self.bs.calculate_greeks(S, otm_put['strike'], T, r, iv, 'put')),
+        ]
+
+        strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='long_strangle',
+                                 underlying_price=S, legs=legs)
+        strat = self.calculate_strategy_metrics(strat, iv)
+        if strat.max_loss > 0:
+            strategies.append(strat)
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 6. Short Straddle
+    # ----------------------------------------------------------------
+    def optimize_short_straddle(self, chain: OptionChain) -> List[MultiLegStrategy]:
+        """SELL ATM Call + SELL ATM Put."""
+        strategies = []
+        if not chain.calls or not chain.puts:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        atm_call = self._find_option(chain.calls, S)
+        atm_put = self._find_option(chain.puts, S)
+        if not atm_call or not atm_put:
+            return strategies
+
+        legs = [
+            TradeLeg(atm_call['strike'], chain.expiration_date, chain.dte,
+                     atm_call['mid_price'], 'call', 'sell',
+                     greeks=self.bs.calculate_greeks(S, atm_call['strike'], T, r, iv, 'call')),
+            TradeLeg(atm_put['strike'], chain.expiration_date, chain.dte,
+                     atm_put['mid_price'], 'put', 'sell',
+                     greeks=self.bs.calculate_greeks(S, atm_put['strike'], T, r, iv, 'put')),
+        ]
+
+        strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='short_straddle',
+                                 underlying_price=S, legs=legs)
+        strat = self.calculate_strategy_metrics(strat, iv)
+        if strat.max_profit > 0:
+            strategies.append(strat)
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 7. Short Strangle
+    # ----------------------------------------------------------------
+    def optimize_short_strangle(self, chain: OptionChain,
+                                call_otm_pct: float = 0.05,
+                                put_otm_pct: float = 0.05) -> List[MultiLegStrategy]:
+        """SELL OTM Call + SELL OTM Put."""
+        strategies = []
+        if not chain.calls or not chain.puts:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        otm_call = self._find_option(chain.calls, S * (1 + call_otm_pct))
+        otm_put = self._find_option(chain.puts, S * (1 - put_otm_pct))
+        if not otm_call or not otm_put:
+            return strategies
+
+        legs = [
+            TradeLeg(otm_call['strike'], chain.expiration_date, chain.dte,
+                     otm_call['mid_price'], 'call', 'sell',
+                     greeks=self.bs.calculate_greeks(S, otm_call['strike'], T, r, iv, 'call')),
+            TradeLeg(otm_put['strike'], chain.expiration_date, chain.dte,
+                     otm_put['mid_price'], 'put', 'sell',
+                     greeks=self.bs.calculate_greeks(S, otm_put['strike'], T, r, iv, 'put')),
+        ]
+
+        strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='short_strangle',
+                                 underlying_price=S, legs=legs)
+        strat = self.calculate_strategy_metrics(strat, iv)
+        if strat.max_profit > 0:
+            strategies.append(strat)
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 8. Long Call
+    # ----------------------------------------------------------------
+    def optimize_long_call(self, chain: OptionChain,
+                           moneyness: str = 'atm') -> List[MultiLegStrategy]:
+        """
+        BUY Call option.
+        moneyness: 'atm', 'otm_5' (5% OTM), 'itm_5' (5% ITM)
+        """
+        strategies = []
+        if not chain.calls:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        if moneyness == 'atm':
+            target = S
+        elif moneyness.startswith('otm_'):
+            pct = float(moneyness.split('_')[1]) / 100
+            target = S * (1 + pct)
+        elif moneyness.startswith('itm_'):
+            pct = float(moneyness.split('_')[1]) / 100
+            target = S * (1 - pct)
+        else:
+            target = S
+
+        opt = self._find_option(chain.calls, target)
+        if not opt:
+            return strategies
+
+        legs = [
+            TradeLeg(opt['strike'], chain.expiration_date, chain.dte,
+                     opt['mid_price'], 'call', 'buy',
+                     greeks=self.bs.calculate_greeks(S, opt['strike'], T, r, iv, 'call')),
+        ]
+
+        strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='long_call',
+                                 underlying_price=S, legs=legs)
+        strat = self.calculate_strategy_metrics(strat, iv)
+        if strat.max_loss > 0:
+            strategies.append(strat)
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 9. Long Put
+    # ----------------------------------------------------------------
+    def optimize_long_put(self, chain: OptionChain,
+                          moneyness: str = 'atm') -> List[MultiLegStrategy]:
+        """
+        BUY Put option.
+        moneyness: 'atm', 'otm_5' (5% OTM), 'itm_5' (5% ITM)
+        """
+        strategies = []
+        if not chain.puts:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        if moneyness == 'atm':
+            target = S
+        elif moneyness.startswith('otm_'):
+            pct = float(moneyness.split('_')[1]) / 100
+            target = S * (1 - pct)
+        elif moneyness.startswith('itm_'):
+            pct = float(moneyness.split('_')[1]) / 100
+            target = S * (1 + pct)
+        else:
+            target = S
+
+        opt = self._find_option(chain.puts, target)
+        if not opt:
+            return strategies
+
+        legs = [
+            TradeLeg(opt['strike'], chain.expiration_date, chain.dte,
+                     opt['mid_price'], 'put', 'buy',
+                     greeks=self.bs.calculate_greeks(S, opt['strike'], T, r, iv, 'put')),
+        ]
+
+        strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='long_put',
+                                 underlying_price=S, legs=legs)
+        strat = self.calculate_strategy_metrics(strat, iv)
+        if strat.max_loss > 0:
+            strategies.append(strat)
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 10. Call Ratio Backspread  (sell 1 lower call, buy 2 higher calls)
+    # ----------------------------------------------------------------
+    def optimize_call_ratio_backspread(self, chain: OptionChain,
+                                       strike_width: float = 5.0) -> List[MultiLegStrategy]:
+        """
+        SELL 1 ATM/ITM Call + BUY 2 OTM Calls (higher strike).
+        Bullish with volatility expansion.
+        """
+        strategies = []
+        if not chain.calls:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        # Short leg: ATM call
+        short_opt = self._find_option(chain.calls, S)
+        if not short_opt:
+            return strategies
+
+        for w in ([strike_width] if isinstance(strike_width, (int, float)) else strike_width):
+            long_opt = self._find_option(chain.calls, short_opt['strike'] + w)
+            if not long_opt:
+                continue
+
+            short_greeks = self.bs.calculate_greeks(S, short_opt['strike'], T, r, iv, 'call')
+            long_greeks = self.bs.calculate_greeks(S, long_opt['strike'], T, r, iv, 'call')
+
+            legs = [
+                TradeLeg(short_opt['strike'], chain.expiration_date, chain.dte,
+                         short_opt['mid_price'], 'call', 'sell', quantity=1,
+                         greeks=short_greeks),
+                TradeLeg(long_opt['strike'], chain.expiration_date, chain.dte,
+                         long_opt['mid_price'], 'call', 'buy', quantity=2,
+                         greeks=long_greeks),
+            ]
+
+            strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='call_ratio_backspread',
+                                     underlying_price=S, legs=legs)
+            strat = self.calculate_strategy_metrics(strat, iv)
+            if strat.max_loss > 0:
+                strategies.append(strat)
+
+        return strategies
+
+    # ----------------------------------------------------------------
+    # 11. Put Ratio Backspread  (sell 1 higher put, buy 2 lower puts)
+    # ----------------------------------------------------------------
+    def optimize_put_ratio_backspread(self, chain: OptionChain,
+                                      strike_width: float = 5.0) -> List[MultiLegStrategy]:
+        """
+        SELL 1 ATM/ITM Put + BUY 2 OTM Puts (lower strike).
+        Bearish with volatility expansion.
+        """
+        strategies = []
+        if not chain.puts:
+            return strategies
+
+        S = chain.underlying_price
+        T = chain.dte / 365.0
+        r = 0.045
+        iv = self._atm_iv(chain)
+
+        # Short leg: ATM put
+        short_opt = self._find_option(chain.puts, S)
+        if not short_opt:
+            return strategies
+
+        for w in ([strike_width] if isinstance(strike_width, (int, float)) else strike_width):
+            long_opt = self._find_option(chain.puts, short_opt['strike'] - w)
+            if not long_opt:
+                continue
+
+            short_greeks = self.bs.calculate_greeks(S, short_opt['strike'], T, r, iv, 'put')
+            long_greeks = self.bs.calculate_greeks(S, long_opt['strike'], T, r, iv, 'put')
+
+            legs = [
+                TradeLeg(short_opt['strike'], chain.expiration_date, chain.dte,
+                         short_opt['mid_price'], 'put', 'sell', quantity=1,
+                         greeks=short_greeks),
+                TradeLeg(long_opt['strike'], chain.expiration_date, chain.dte,
+                         long_opt['mid_price'], 'put', 'buy', quantity=2,
+                         greeks=long_greeks),
+            ]
+
+            strat = MultiLegStrategy(ticker=chain.ticker, strategy_type='put_ratio_backspread',
+                                     underlying_price=S, legs=legs)
+            strat = self.calculate_strategy_metrics(strat, iv)
+            if strat.max_loss > 0:
+                strategies.append(strat)
+
         return strategies
