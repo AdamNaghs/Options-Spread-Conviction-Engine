@@ -365,6 +365,49 @@ class LegOptimizer:
         
         return strategy
     
+    def score_strategies(self, strategies: List[MultiLegStrategy], 
+                         mode: str = 'ev') -> List[MultiLegStrategy]:
+        """
+        Score and sort strategies based on specified mode
+        
+        Args:
+            strategies: List of MultiLegStrategy objects
+            mode: Scoring mode - 'pop' (maximize POP), 'ev' (maximize expected value),
+                  'income' (maximize theta/income)
+        
+        Returns:
+            Sorted list of strategies (highest score first)
+        """
+        # Ensure all strategies have metrics calculated
+        for strategy in strategies:
+            if strategy.pop == 0 and strategy.legs:
+                # Need to calculate metrics - use default IV
+                self.calculate_strategy_metrics(strategy)
+        
+        # Sort based on mode
+        if mode == 'pop':
+            # Sort by POP (highest first), then by max_loss (lowest first)
+            scored = sorted(strategies, 
+                          key=lambda s: (s.pop, -s.max_loss), 
+                          reverse=True)
+        elif mode == 'ev':
+            # Sort by EV score (already calculated in metrics)
+            scored = sorted(strategies, 
+                          key=lambda s: (s.ev_score, s.pop), 
+                          reverse=True)
+        elif mode == 'income':
+            # Sort by income score (theta-based)
+            scored = sorted(strategies, 
+                          key=lambda s: (s.income_score, s.pop), 
+                          reverse=True)
+        else:
+            # Default to EV sorting
+            scored = sorted(strategies, 
+                          key=lambda s: s.ev_score, 
+                          reverse=True)
+        
+        return scored
+    
     def optimize_vertical_spreads(self, chain: OptionChain, 
                                   spread_type: str = 'put_credit',
                                   max_width: float = 5.0,
@@ -425,6 +468,20 @@ class LegOptimizer:
                     logger.debug("Skipping short strike %.0f: wide spread %.1f%%",
                                  short_opt['strike'], short_opt['spread_pct'] * 100)
                     continue
+                
+                # Require non-zero bid for a real market (avoid $0.00 bid / $0.01 ask phantom quotes)
+                bid = short_opt.get('bid', 0) or 0
+                if bid <= 0:
+                    logger.debug("Skipping short strike %.0f: zero bid (no real market)", short_opt['strike'])
+                    continue
+                
+                # Volume/Open Interest filter - avoid phantom quotes with no actual market
+                volume = short_opt.get('volume', 0) or 0
+                oi = short_opt.get('open_interest', 0) or 0
+                if volume == 0 and oi == 0:
+                    logger.debug("Skipping short strike %.0f: zero volume and open interest", short_opt['strike'])
+                    continue
+                
                 # For $1-wide spreads on expensive underlyings, skip deep OTM 
                 # where net credit would be negligible (< $0.05/share)
                 # This is checked after pairing below
@@ -452,6 +509,19 @@ class LegOptimizer:
                 
                 # Skip if same strike
                 if short_opt['strike'] == long_opt['strike']:
+                    continue
+                
+                # Volume/Open Interest filter for long strike
+                long_volume = long_opt.get('volume', 0) or 0
+                long_oi = long_opt.get('open_interest', 0) or 0
+                if long_volume == 0 and long_oi == 0:
+                    logger.debug("Skipping long strike %.0f: zero volume and open interest", long_opt['strike'])
+                    continue
+                
+                # Require non-zero bid for long strike too
+                long_bid = long_opt.get('bid', 0) or 0
+                if long_bid <= 0:
+                    logger.debug("Skipping long strike %.0f: zero bid (no real market)", long_opt['strike'])
                     continue
                 
                 # Calculate implied vol for Black-Scholes
