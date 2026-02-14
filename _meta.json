@@ -1,6 +1,6 @@
 {
   "name": "options-spread-conviction-engine",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Multi-regime options spread analysis engine with Kelly Criterion Position Sizing, Multi-Leg Strategies (iron condor, butterfly, calendar), and Quantitative Scanning. Scores vertical spreads using Ichimoku, RSI, MACD, Bollinger Bands, and IV term structure with mathematically-optimal position sizing.",
   "author": "Adam Naghavi & Leonardo Da Pinchy",
   "homepage": "https://github.com/AdamNaghs/Options-Spread-Conviction-Engine",
