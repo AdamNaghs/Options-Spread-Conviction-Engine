@@ -443,11 +443,21 @@ def fetch_ohlcv(ticker: str, period: str = "2y", interval: str = "1d") -> pd.Dat
         pd.DataFrame with columns: Open, High, Low, Close, Volume
 
     Raises:
-        ValueError: If no data is returned for the given ticker or invalid ticker format.
+        ValueError: If no data is returned for the given ticker or invalid ticker format,
+                   or if period/interval are not valid Yahoo Finance values.
     """
     # Validate ticker format (1-5 uppercase letters)
     if not re.match(r'^[A-Z]{1,5}$', ticker.upper()):
         raise ValueError(f"Invalid ticker format: '{ticker}'. Expected 1-5 uppercase letters (e.g., AAPL, SPY)")
+    
+    # Validate period and interval
+    valid_periods = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
+    valid_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+    
+    if period not in valid_periods:
+        raise ValueError(f"Invalid period: {period}. Must be one of {valid_periods}")
+    if interval not in valid_intervals:
+        raise ValueError(f"Invalid interval: {interval}. Must be one of {valid_intervals}")
 
     df = yf.download(ticker, period=period, interval=interval, progress=False)
 

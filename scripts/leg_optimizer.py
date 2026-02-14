@@ -42,6 +42,21 @@ class TradeLeg:
     quantity: int = 1
     greeks: Optional[Greeks] = None
     
+    def __post_init__(self):
+        """Validate TradeLeg inputs after initialization."""
+        if self.option_type not in {'call', 'put'}:
+            raise ValueError(f"option_type must be 'call' or 'put', got {self.option_type}")
+        if self.action not in {'buy', 'sell'}:
+            raise ValueError(f"action must be 'buy' or 'sell', got {self.action}")
+        if self.strike <= 0:
+            raise ValueError(f"strike must be positive, got {self.strike}")
+        if self.dte < 0:
+            raise ValueError(f"dte must be non-negative, got {self.dte}")
+        if self.premium < 0:
+            raise ValueError(f"premium must be non-negative, got {self.premium}")
+        if self.quantity <= 0:
+            raise ValueError(f"quantity must be positive, got {self.quantity}")
+    
     @property
     def net_premium(self) -> float:
         """Net premium for this leg (positive = credit, negative = debit)"""
@@ -408,16 +423,38 @@ class LegOptimizer:
         T = max(strategy.legs[0].dte, 1) / 365.0  # Ensure minimum 1 day
         S = strategy.underlying_price
         
+        # Use Monte Carlo simulation for more accurate POP calculation
+        # Monte Carlo simulates terminal price distribution using GBM,
+        # which can produce more accurate results than Black-Scholes closed-form
+        # especially for wider spreads where log-normal assumptions matter more.
+        # This aligns better with how platforms like TastyTrade calculate POP.
+        
         if strategy.strategy_type == 'put_credit_spread':
-            strategy.pop = self.calc.pop_vertical_spread(
-                S, short_leg.strike, long_leg.strike, T, iv,
-                net_premium, 'put_credit'
-            )
+            try:
+                breakeven = strategy.breakevens[0] if strategy.breakevens else (short_leg.strike - net_premium)
+                mc_pop = self.calc.monte_carlo_pop_vertical(
+                    S, breakeven, T, iv, 'put_credit', n_sims=100000
+                )
+                strategy.pop = mc_pop
+            except Exception as e:
+                logger.debug(f"Monte Carlo POP failed for put credit spread, falling back to Black-Scholes: {e}")
+                strategy.pop = self.calc.pop_vertical_spread(
+                    S, short_leg.strike, long_leg.strike, T, iv,
+                    net_premium, 'put_credit'
+                )
         elif strategy.strategy_type == 'call_credit_spread':
-            strategy.pop = self.calc.pop_vertical_spread(
-                S, short_leg.strike, long_leg.strike, T, iv,
-                net_premium, 'call_credit'
-            )
+            try:
+                breakeven = strategy.breakevens[0] if strategy.breakevens else (short_leg.strike + net_premium)
+                mc_pop = self.calc.monte_carlo_pop_vertical(
+                    S, breakeven, T, iv, 'call_credit', n_sims=100000
+                )
+                strategy.pop = mc_pop
+            except Exception as e:
+                logger.debug(f"Monte Carlo POP failed for call credit spread, falling back to Black-Scholes: {e}")
+                strategy.pop = self.calc.pop_vertical_spread(
+                    S, short_leg.strike, long_leg.strike, T, iv,
+                    net_premium, 'call_credit'
+                )
         elif strategy.strategy_type == 'iron_condor':
             # Get breakevens for Monte Carlo simulation
             lower_breakeven = strategy.breakevens[0] if strategy.breakevens else (put_short.strike - net_premium)
@@ -605,13 +642,15 @@ class LegOptimizer:
     
     def optimize_vertical_spreads(self, chain: OptionChain, 
                                   spread_type: str = 'put_credit',
-                                  max_width: float = 5.0,
+                                  max_width: float = None,  # Auto-calculate if None
                                   min_dte: int = 7,
                                   max_dte: int = 45) -> List[MultiLegStrategy]:
         """
         Find optimal vertical spreads from options chain
         
         spread_type: 'put_credit', 'call_credit', 'put_debit', 'call_debit'
+        max_width: Maximum spread width in dollars. If None, auto-calculates
+                   based on underlying price to allow $100+ credit trades.
         """
         strategies = []
         
@@ -629,11 +668,23 @@ class LegOptimizer:
         T = chain.dte / 365.0
         r = 0.045
         
-        # Get widths to try
-        # $1-wide spreads are critical for high-priced underlyings (SPY, QQQ)
-        # where OTM credit spreads need narrow widths to fit small accounts
-        # Wider spreads (7, 10, 15, 20) useful for larger accounts seeking better credit
-        widths = [w for w in [1, 2, 3, 5, 7, 10, 15, 20] if w <= max_width]
+        # Auto-calculate max_width if not provided
+        # For $100+ credit, need ~5-10 point wide spreads on QQQ/SPY
+        # Formula: wider spreads for higher-priced underlyings
+        if max_width is None:
+            if S >= 500:  # QQQ, SPY, high-priced stocks
+                max_width = 25.0
+            elif S >= 200:  # Mid-priced stocks
+                max_width = 15.0
+            else:  # Lower-priced stocks
+                max_width = 10.0
+        
+        # Get widths to try - now includes wider spreads for larger credits
+        # $1-wide spreads: critical for high-priced underlyings where OTM credit 
+        #                  spreads need narrow widths to fit small accounts
+        # $5-10 wide: balanced risk/reward for medium accounts
+        # $15-25 wide: for larger accounts seeking $100+ credits
+        widths = [w for w in [1, 2, 3, 5, 7, 10, 12, 15, 18, 20, 25] if w <= max_width]
         
         for width in widths:
             # Try different short strikes
@@ -720,19 +771,23 @@ class LegOptimizer:
                     continue
                 
                 # Calculate implied vol for Black-Scholes
-                # Use ATM IV as estimate
-                atm_idx = min(range(len(options)), 
-                             key=lambda k: abs(options[k]['strike'] - S))
-                iv = max(options[atm_idx]['implied_vol'] or 0.20, 0.15)
+                # Use strike-specific IV for more accurate POP calculation
+                # Use strike-specific IVs for each leg
+                # For credit spreads, the short leg IV is most important as it determines breakeven
+                short_iv = max(short_opt.get('implied_vol') or 0.25, self.IV_FLOOR)
+                long_iv = max(long_opt.get('implied_vol') or 0.25, self.IV_FLOOR)
                 
-                # Calculate Greeks for both legs
+                # For POP calculation, use short leg IV specifically
+                # The short strike determines the breakeven for credit spreads
+                # The long leg is just protection and doesn't affect POP as much
+                iv = short_iv
+                
+                # Calculate Greeks for both legs using their specific IVs
                 short_greeks = self.bs.calculate_greeks(
-                    S, short_opt['strike'], T, r, 
-                    max(short_opt['implied_vol'] or iv, 0.15), opt_type
+                    S, short_opt['strike'], T, r, short_iv, opt_type
                 )
                 long_greeks = self.bs.calculate_greeks(
-                    S, long_opt['strike'], T, r,
-                    max(long_opt['implied_vol'] or iv, 0.15), opt_type
+                    S, long_opt['strike'], T, r, long_iv, opt_type
                 )
                 
                 # Use mid-point pricing for realistic fill estimates:

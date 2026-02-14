@@ -1,7 +1,7 @@
 ---
 name: options-spread-conviction-engine
-description: Multi-regime options spread analysis engine with Kelly Criterion Position Sizing. Scores vertical spreads (bull put, bear call, bull call, bear put) and multi-leg strategies (iron condors, butterflies, calendar spreads) using Ichimoku, RSI, MACD, Bollinger Bands, IV term structure, and mathematically-optimal Kelly position sizing. Outputs 0-100 conviction scores with actionable recommendations and contract sizing.
-version: 2.2.0
+description: Multi-regime options spread analysis engine with quantitative rigor. Features regime detection (VIX-based), GARCH volatility forecasting, drawdown-constrained Kelly position sizing, and walk-forward backtesting. Scores vertical spreads (bull put, bear call, bull call, bear put) and multi-leg strategies (iron condors, butterflies, calendar spreads) using Ichimoku, RSI, MACD, Bollinger Bands, and IV term structure analysis.
+version: 2.3.0
 author: Leonardo Da Pinchy
 metadata:
   openclaw:
@@ -286,6 +286,176 @@ This correlation is well-documented: realized volatility (BBW) and implied volat
 
 For calendar spreads, the engine attempts to fetch live ATM implied volatility from Yahoo Finance options chains. If unavailable, it falls back to historical volatility term structure (HV 10-day vs HV 30-day) as a proxy.
 
+## Quantitative Modules (v2.3.0)
+
+The engine now includes four quantitative modules for rigorous strategy validation and optimization:
+
+### 1. Regime Detector (`regime_detector.py`)
+
+Market regime classification using VIX percentiles:
+- **CRISIS**: VIX > 80th percentile — favors premium selling (iron condors)
+- **HIGH_VOL**: VIX 60-80th — elevated IV benefits credit spreads
+- **NORMAL**: VIX 40-60th — balanced environment, all strategies viable
+- **LOW_VOL**: VIX 20-40th — cheap options favor debit spreads
+- **EUPHORIA**: VIX < 20th — momentum continues, mean reversion brewing
+
+```bash
+# Detect current regime
+python3 scripts/regime_detector.py
+
+# Get regime-adjusted weights for specific strategy
+python3 scripts/regime_detector.py --strategy iron_condor --json
+```
+
+**Integration:**
+```python
+from regime_detector import RegimeDetector
+
+detector = RegimeDetector()
+regime, confidence = detector.detect_regime()
+weights = detector.get_regime_weights(regime)
+adjusted_score, reasoning = detector.regime_aware_score(75, regime, 'bull_put')
+```
+
+### 2. Volatility Forecaster (`vol_forecaster.py`)
+
+GARCH-based realized volatility forecasting with VRP analysis:
+- Fits GARCH(1,1) to historical returns
+- Forecasts realized volatility over configurable horizon
+- Calculates volatility risk premium (IV - RV forecast)
+- Provides conviction adjustments based on VRP
+
+```bash
+# Analyze AAPL volatility
+python3 scripts/vol_forecaster.py AAPL
+
+# Compare IV = 25% vs forecast RV
+python3 scripts/vol_forecaster.py SPY --iv 0.25 --horizon 5
+```
+
+**Interpretation:**
+- VRP > 5%: Favorable for selling premium (credit spreads)
+- VRP < -5%: Favorable for buying premium (debit spreads)
+- VRP near 0: No volatility edge, focus on directional setup
+
+**Integration:**
+```python
+from vol_forecaster import VolatilityForecaster
+
+forecaster = VolatilityForecaster("AAPL")
+params = forecaster.fit_garch()  # Returns omega, alpha, beta
+forecast = forecaster.forecast_vol(horizon=5)
+vrp, strength, rec = forecaster.vol_risk_premium(iv=0.25, rv_forecast=forecast.annualized_vol)
+adjusted_score, reasoning = forecaster.add_to_conviction(70, vrp_signal, 'bull_put')
+```
+
+### 3. Enhanced Kelly Sizer (`enhanced_kelly.py`)
+
+Drawdown-constrained, correlation-aware position sizing:
+- Full Kelly criterion calculation
+- Drawdown constraint: f_dd = f_kelly × (1 - target_dd / max_dd)
+- Conviction-based Kelly scaling:
+  - 90-100: Half Kelly
+  - 80-89: Quarter Kelly
+  - 60-79: Eighth Kelly
+  - <60: No position
+- Correlation penalty for portfolio context
+
+```bash
+# Calculate position with $390 account
+python3 scripts/enhanced_kelly.py --loss 80 --win 40 --pop 0.65 --conviction 85
+
+# Include correlation with existing position
+python3 scripts/enhanced_kelly.py --loss 80 --win 40 --pop 0.65 --conviction 85 --correlation 0.3
+```
+
+**Integration:**
+```python
+from enhanced_kelly import EnhancedKellySizer
+
+sizer = EnhancedKellySizer(account_value=390, max_drawdown=0.20)
+result = sizer.calculate_position(
+    spread_cost=80,
+    max_loss=80,
+    win_amount=40,
+    conviction=85,
+    pop=0.65,
+    existing_correlation=0.0
+)
+# Returns: contracts, total_risk, kelly_fraction, recommendation
+```
+
+### 4. Backtest Validator (`backtest_validator.py`)
+
+Walk-forward validation of conviction scores:
+- Simulates historical trades across ticker universe
+- Validates tier separation (EXECUTE vs WAIT performance)
+- Statistical tests (t-tests, ANOVA)
+- Tier separation scoring (0-1)
+- Weight calibration suggestions
+
+```bash
+# Backtest bull_put on AAPL, MSFT, SPY (2022-2024)
+python3 scripts/backtest_validator.py --tickers AAPL MSFT SPY --start 2022-01-01 --end 2024-01-01 --strategy bull_put
+
+# JSON output for analysis
+python3 scripts/backtest_validator.py --tickers SPY --json
+```
+
+**Output Metrics:**
+- Win rate per tier
+- Expectancy per tier: (win_rate × avg_win) - (loss_rate × avg_loss)
+- Sharpe ratio per tier
+- P-values for tier differences
+- Separation score (0-1, higher = better discrimination)
+
+**Integration:**
+```python
+from backtest_validator import BacktestValidator
+
+validator = BacktestValidator(engine, "2022-01-01", "2024-01-01")
+results_df = validator.run_walk_forward(["AAPL", "MSFT"], hold_days=5)
+report = validator.validate_tiers(results_df)
+print(f"Separation score: {report.tier_separation_score:.2f}")
+print(f"EXECUTE vs WAIT p-value: {report.p_values['execute_vs_wait']:.4f}")
+```
+
+### 5. Quantitative Integration (`quantitative_integration.py`)
+
+Unified interface combining all quantitative modules:
+
+```bash
+# Full quantitative analysis with regime and VRP
+python3 scripts/quantitative_integration.py AAPL --regime-aware --vol-aware
+
+# With Kelly sizing
+python3 scripts/quantitative_integration.py SPY --regime-aware --pop 0.65 --max-loss 80 --win-amount 40
+
+# Run backtest validation
+python3 scripts/quantitative_integration.py --backtest SPY QQQ --start 2022-01-01 --end 2024-01-01
+```
+
+**Integration:**
+```python
+from quantitative_integration import QuantConvictionEngine
+
+engine = QuantConvictionEngine(account_value=390, max_drawdown=0.20)
+
+# Analyze with regime and VRP adjustments
+result = engine.analyze("AAPL", "bull_put", regime_aware=True, vol_aware=True)
+print(f"Final score: {result.final_score}")
+print(f"Regime: {result.regime}")
+print(f"VRP: {result.vrp_signal.vrp if result.vrp_signal else 'N/A'}")
+
+# Calculate position size
+sizing = engine.calculate_position(result, pop=0.65, max_loss=80, win_amount=40)
+print(f"Contracts: {sizing['contracts']}")
+
+# Run backtest validation
+report = engine.run_backtest(["SPY", "QQQ"], "2022-01-01", "2024-01-01")
+print(f"Recommendation: {report.recommendation}")
+```
+
 ## Academic Foundation
 
 - **Ichimoku Cloud** — Trend structure (Hosoda, 1968)
@@ -301,23 +471,39 @@ Combining orthogonal signals reduces false-positive rate compared to single-indi
 ```
 conviction-engine/
 ├── scripts/
-│   ├── conviction-engine           # CLI wrapper (bash)
-│   ├── spread_conviction_engine.py # Core engine (vertical spreads)
-│   ├── multi_leg_strategies.py     # Multi-leg extensions
-│   ├── quant_scanner.py            # Quantitative options scanner
-│   ├── market_scanner.py           # Technical market scanner
-│   ├── calculator.py               # Black-Scholes & POP calculator
-│   ├── position_sizer.py           # Kelly position sizing
-│   ├── chain_analyzer.py           # IV surface analyzer
-│   ├── options_math.py             # Core mathematical models
-│   └── setup-venv.sh              # Environment setup
-└── SKILL.md                        # This documentation
+│   ├── conviction-engine              # CLI wrapper (bash)
+│   ├── spread_conviction_engine.py    # Core engine (vertical spreads)
+│   ├── multi_leg_strategies.py        # Multi-leg extensions
+│   ├── quantitative_integration.py    # Unified quantitative interface
+│   ├── regime_detector.py             # VIX-based regime classification
+│   ├── vol_forecaster.py              # GARCH volatility forecasting
+│   ├── enhanced_kelly.py              # Drawdown-constrained Kelly sizing
+│   ├── backtest_validator.py          # Walk-forward validation
+│   ├── quant_scanner.py               # Quantitative options scanner
+│   ├── market_scanner.py              # Technical market scanner
+│   ├── calculator.py                  # Black-Scholes & POP calculator
+│   ├── position_sizer.py              # Kelly position sizing
+│   ├── chain_analyzer.py              # IV surface analyzer
+│   ├── options_math.py                # Core mathematical models
+│   └── setup-venv.sh                  # Environment setup
+├── tests/                             # Unit tests
+│   ├── test_regime_detector.py
+│   ├── test_vol_forecaster.py
+│   ├── test_enhanced_kelly.py
+│   ├── test_backtest_validator.py
+│   └── run_tests.py
+└── SKILL.md                           # This documentation
 ```
 
 ### Module Separation
 
 - **spread_conviction_engine.py**: Vertical spreads, shared infrastructure (data fetching, indicator computation)
 - **multi_leg_strategies.py**: Iron condors, butterflies, calendars (imports from main engine)
+- **quantitative_integration.py**: Unified interface for regime/vol/Kelly/backtest modules
+- **regime_detector.py**: Market regime classification using VIX percentiles
+- **vol_forecaster.py**: GARCH-based realized volatility forecasting
+- **enhanced_kelly.py**: Drawdown-constrained, correlation-aware position sizing
+- **backtest_validator.py**: Walk-forward validation of conviction scores
 
 This separation keeps concerns clean while avoiding duplication.
 
@@ -445,6 +631,13 @@ result = calculate_position(
 
 ## Version History
 
+- **v2.3.0** (2026-02-13): Quantitative rigor upgrade
+  - Regime Detector: VIX-based market regime classification
+  - Volatility Forecaster: GARCH-based RV forecasting with VRP analysis
+  - Enhanced Kelly Sizer: Drawdown-constrained, correlation-aware position sizing
+  - Backtest Validator: Walk-forward validation with tier separation testing
+  - Quantitative Integration: Unified interface for all quantitative modules
+  - Comprehensive unit test suite for all new modules
 - **v2.2.0** (2026-02-13): Kelly Criterion position sizing with full/half Kelly, edge calculation, and account-aware contract sizing
 - **v2.1.0** (2026-02-12): Added market scanner, integrated calculator and position sizer
 - **v2.0.0** (2026-02-12): Added multi-leg strategies (iron condor, butterfly, calendar)

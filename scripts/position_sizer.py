@@ -51,7 +51,10 @@ Example Usage:
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Optional, Dict, Any
+
+# Import enhanced Kelly for unified implementation
+from enhanced_kelly import EnhancedKellySizer, KellyFraction, PositionResult
 
 
 # ---------------------------------------------------------------------------
@@ -68,16 +71,16 @@ WIDE_SPREAD_THRESHOLD: float = 150.0       # Flag spreads wider than this
 
 
 # ---------------------------------------------------------------------------
-# Core: Kelly Criterion
+# Core: Kelly Criterion (delegated to enhanced_kelly module)
 # ---------------------------------------------------------------------------
 
-def kelly_criterion(
-    pop: float,
-    win_amount: float,
-    loss_amount: float,
-) -> float:
-    """Compute the full Kelly criterion percentage.
-
+def kelly_criterion(pop: float, win_amount: float, loss_amount: float) -> float:
+    """
+    Compute the full Kelly criterion percentage.
+    
+    This is a convenience wrapper around EnhancedKellySizer.kelly_criterion()
+    for backwards compatibility.
+    
     Args:
         pop: Probability of profit, between 0.0 and 1.0.
         win_amount: Dollar profit if the trade wins (positive).
@@ -86,17 +89,6 @@ def kelly_criterion(
     Returns:
         Kelly percentage as a decimal (e.g. 0.10 = 10% of bankroll).
         Returns 0.0 if the edge is zero or negative.
-
-    Raises:
-        ValueError: If inputs are out of valid ranges.
-
-    Examples:
-        >>> kelly_criterion(0.65, 100, 200)
-        -0.05
-        >>> kelly_criterion(0.55, 40, 80)
-        -0.725
-        >>> kelly_criterion(0.70, 150, 50)
-        0.5
     """
     if not 0.0 <= pop <= 1.0:
         raise ValueError(f"POP must be between 0 and 1, got {pop}")
@@ -104,8 +96,9 @@ def kelly_criterion(
         raise ValueError(f"win_amount must be positive, got {win_amount}")
     if loss_amount <= 0:
         raise ValueError(f"loss_amount must be positive, got {loss_amount}")
-
-    kelly = (pop * win_amount - (1 - pop) * loss_amount) / win_amount
+    
+    sizer = EnhancedKellySizer()
+    kelly, _ = sizer.kelly_criterion(pop, win_amount, loss_amount)
     return kelly
 
 
@@ -441,6 +434,57 @@ def screen_trades(
     results.sort(key=lambda x: (priority.get(x["recommendation"], 3), -x["kelly_full_pct"]))
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Enhanced Kelly Integration
+# ---------------------------------------------------------------------------
+
+def calculate_position_enhanced(
+    spread_cost: float,
+    max_loss: float,
+    win_amount: float,
+    conviction: float,
+    pop: float,
+    account_value: float = DEFAULT_ACCOUNT_VALUE,
+    max_drawdown: float = 0.20,
+    existing_correlation: float = 0.0,
+) -> Dict[str, Any]:
+    """
+    Calculate position size using enhanced Kelly criterion.
+    
+    This function uses the EnhancedKellySizer for
+    drawdown-constrained, conviction-based position sizing.
+    
+    Args:
+        spread_cost: Cost to enter one spread.
+        max_loss: Maximum loss per contract.
+        win_amount: Maximum win per contract.
+        conviction: Conviction score from engine (0-100).
+        pop: Probability of profit.
+        account_value: Account value in dollars.
+        max_drawdown: Maximum acceptable drawdown.
+        existing_correlation: Correlation with existing positions.
+        
+    Returns:
+        Position sizing dictionary with enhanced metrics.
+        
+    Example:
+        >>> result = calculate_position_enhanced(
+        ...     spread_cost=80, max_loss=80, win_amount=40,
+        ...     conviction=85, pop=0.65
+        ... )
+        >>> print(f"Contracts: {result['contracts']}")
+    """
+    sizer = EnhancedKellySizer(account_value, max_drawdown)
+    return sizer.calculate_position(
+        spread_cost=spread_cost,
+        max_loss=max_loss,
+        win_amount=win_amount,
+        conviction=conviction,
+        pop=pop,
+        existing_correlation=existing_correlation,
+    )
 
 
 # ---------------------------------------------------------------------------

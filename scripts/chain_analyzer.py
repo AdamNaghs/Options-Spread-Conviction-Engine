@@ -94,7 +94,7 @@ class ChainFetcher:
                 return None
             
             return cached.get('data')
-        except:
+        except (FileNotFoundError, PermissionError, pickle.PickleError, IOError):
             return None
     
     def _save_to_cache(self, cache_key: str, data: Dict):
@@ -103,8 +103,8 @@ class ChainFetcher:
         try:
             with open(cache_path, 'wb') as f:
                 pickle.dump({'timestamp': time.time(), 'data': data}, f)
-        except:
-            pass
+        except (FileNotFoundError, PermissionError, pickle.PickleError, IOError) as e:
+            logger.warning(f"Failed to save cache: {e}")
     
     def fetch_quote(self, ticker: str) -> Optional[Dict]:
         """Fetch current stock quote via yfinance"""
@@ -150,7 +150,8 @@ class ChainFetcher:
                             'dte': dte,
                             'datetime': dt
                         })
-                except:
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"Skipping invalid expiration date {date_str}: {e}")
                     continue
             
             expirations.sort(key=lambda x: x['dte'])
@@ -526,8 +527,8 @@ class ChainAnalyzer:
                            key=lambda k: abs(strikes[k] - target_strike))
                     if abs(strikes[j] - target_strike) < 0.5:  # Within $0.50
                         pairs.append([opt, options[j]])
-                except:
-                    pass
+                except (ValueError, IndexError) as e:
+                    logger.debug(f"Could not find matching put strike: {e}")
             else:  # call
                 # Look for long strike $width above short strike
                 target_strike = opt['strike'] + width
@@ -536,8 +537,8 @@ class ChainAnalyzer:
                            key=lambda k: abs(strikes[k] - target_strike))
                     if abs(strikes[j] - target_strike) < 0.5:
                         pairs.append([opt, options[j]])
-                except:
-                    pass
+                except (ValueError, IndexError) as e:
+                    logger.debug(f"Could not find matching call strike: {e}")
         
         return pairs
     
